@@ -1,0 +1,32 @@
+[package]
+name = "aureole-bundle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "把应用打包：macOS 的 .app 和 .dmg（含通用二进制），Windows、Linux 的安装包（交给 cargo-packager）"
+
+[lints]
+workspace = true
+
+[dependencies]
+zeno.workspace = true
+png.workspace = true
+image.workspace = true
+serde_json.workspace = true
+# 安装包的格式；不要界面，打包工具不用带上框架
+aureole-installer = { path = "../installer", version = "0.0.1-beta.1", default-features = false }
+
+# 把图标嵌进 Windows 的可执行文件
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+
+# 可执行文件不叫 bundle：打包的输出目录是 target/<profile>/bundle/，同名时 cargo build 会因为删不掉这个目录而失败。
+# 叫 cargo-bundle 也能用 cargo install --path crates/bundle 装成真正的 cargo 子命令
+[[bin]]
+name = "cargo-bundle"
+path = "src/main.rs"

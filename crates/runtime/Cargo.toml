@@ -1,0 +1,48 @@
+[package]
+name = "aureole-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的运行时：应用、窗口和事件循环、输入换算、渲染线程、菜单托盘、对话框、系统集成，把核心接到真实的窗口和 GPU 上"
+
+[lints]
+workspace = true
+
+[dependencies]
+aureole-core.workspace = true
+# `devtools` 特性：重新编译后原地重启要监视自己的可执行文件
+devtools = { workspace = true, optional = true }
+reactive.workspace = true
+scene.workspace = true
+render.workspace = true
+platform.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
+# 一个窗口事件换算出的几个输入事件、按键的文字：和核心用同一版
+smallvec.workspace = true
+smol_str.workspace = true
+tracing.workspace = true
+# `tokio` 特性：TokioPlugin 收应用自己的运行时
+tokio = { workspace = true, optional = true }
+
+[features]
+default = ["menus"]
+# 菜单栏和托盘（`Menu`、`Tray`、`App::menu`、`App::tray`）
+menus = ["platform/menus"]
+# 接入 tokio 的插件（TokioPlugin）：后台任务的执行器换成 tokio
+tokio = ["aureole-core/tokio", "dep:tokio"]
+# 开发工具：重新编译后原地重启（`restart` 模块、`App::restarts_on_rebuild`）
+devtools = ["dep:devtools"]
+
+
+[dev-dependencies]
+# 文档里的例子按应用的写法用门面（`use aureole::prelude::*`）；原地重启的文档和 tokio 插件的测试用得到这两个特性
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole", features = ["testing", "devtools"] }

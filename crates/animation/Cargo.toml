@@ -1,0 +1,16 @@
+[package]
+name = "aureole-animation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的动画曲线与插值：弹簧、补间、关键帧，不依赖界面和渲染"
+
+[lints]
+workspace = true
+
+[dependencies]

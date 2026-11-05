@@ -1,0 +1,17 @@
+[package]
+name = "aureole-scene"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的场景数据：图元、显示列表、裁剪、分组、合成层的变换、颜色和图集更新，不依赖 GPU"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck.workspace = true

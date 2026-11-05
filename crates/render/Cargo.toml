@@ -1,0 +1,37 @@
+[package]
+name = "aureole-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的 GPU 渲染器：把场景数据画成像素，SDF 实例化图元，分组特效和离屏渲染"
+
+[lints]
+workspace = true
+
+[dependencies]
+# 图元、显示列表、颜色这些要画什么的数据在 scene 里，这里只是 GPU 后端
+scene.workspace = true
+wgpu.workspace = true
+tracing.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+half.workspace = true
+
+# 测试：不开窗口，在一个 CAMetalLayer 上建表面，检查扩展范围的输出（格式、色彩空间、EDR）真的配置上了
+# 改窗口大小时画面和窗口一起变：设 Metal 层的内容重力和呈现方式（`presentation.rs`）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-quartz-core = { workspace = true, features = ["objc2-metal", "CALayer", "CAMetalLayer", "CATransaction"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2.workspace = true
+objc2-quartz-core = { workspace = true, features = ["objc2-core-foundation", "objc2-core-graphics", "CALayer", "CAMetalLayer", "objc2-metal"] }
+objc2-core-graphics = { workspace = true, features = ["CGColorSpace"] }
+
+[dev-dependencies]
+# 测试里解析着色器，核对 Rust 结构和 WGSL 结构的偏移
+naga = { workspace = true, features = ["wgsl-in"] }

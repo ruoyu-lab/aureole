@@ -1,0 +1,75 @@
+[package]
+name = "aureole-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的核心：元素树、属性、样式对象、布局、文字和编辑、事件路由、焦点、浮层、无障碍树、绘制、动画，不依赖窗口和 GPU"
+
+[lints]
+workspace = true
+
+[dependencies]
+animation.workspace = true
+reactive.workspace = true
+# 要画什么的数据（图元、显示列表、颜色、图集更新）
+scene.workspace = true
+taffy.workspace = true
+slotmap.workspace = true
+parley.workspace = true
+swash.workspace = true
+zeno.workspace = true
+bitflags.workspace = true
+smol_str.workspace = true
+smallvec.workspace = true
+pastey.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+accesskit.workspace = true
+image.workspace = true
+# PNG 的 cICP 块（HDR 的 PQ、HLG 图片）由 png 直接读；image 内部用的是同一版
+png.workspace = true
+moxcms.workspace = true
+half.workspace = true
+bytemuck.workspace = true
+# `char-grid` 特性：一个字占几格
+unicode-width = { workspace = true, optional = true }
+# `woff2` 特性
+wuff = { workspace = true, optional = true }
+# `svg` 特性
+usvg = { workspace = true, optional = true }
+# 字素簇（无障碍按字素簇给文字片段）总是要；`cjk-words` 特性再带上中日文词典。排版（parley）已经用了同一版、同样的数据
+icu_segmenter = { workspace = true, features = ["compiled_data"] }
+# ICU4X 的数据接口（中日文词典的数据源用它）。开 `logging`：找不到数据时的提示交给 `log`，没人接收时什么都不做；
+# 不开时调试构建里每次都直接打印到标准错误。parley 排版时不带中日文、东南亚文字的分词数据（见 `segmentation.rs`），
+# 排这些文字时 ICU4X 每次都提示"没有这种文字的分词模型"，这是预期的，打字时会刷屏
+icu_provider = { workspace = true, features = ["logging"] }
+# `tokio` 特性：运行时（多线程）、计时器、网络、同步原语、读写工具，
+# 正是 reqwest、sqlx、tonic 这些库要的；默认不编译
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "sync", "io-util"], optional = true }
+
+[features]
+default = ["cjk-words", "char-grid"]
+# 字符网格：`char_grid`、`CharGrid` 和它们的类型（终端、代码编辑器）
+char-grid = ["dep:unicode-width"]
+# 双击选词、Option+方向键在中文、日文里按词走（二进制大约多 2 MB 的词典）；关掉时按字
+cjk-words = []
+# `font::load` 认得 WOFF2、WOFF：先解压成 TTF / OTF 再登记（release 二进制大约多 260 KB，一半是 Brotli 的内置词典）。默认关
+woff2 = ["dep:wuff", "wuff/brotli", "wuff/z"]
+# `image()` 认得 SVG 文件：后台解析，画成矢量路径。默认关
+svg = ["dep:usvg"]
+# `spawn_tokio`、`resource_tokio`：在 tokio 运行时上跑需要它的库（reqwest、sqlx、tonic……），结果照样交回主线程
+tokio = ["dep:tokio"]
+
+# Linux 上系统字体走 fontconfig：运行时动态加载，编译时不需要 pkg-config 和开发包（也能在别的系统上交叉检查）
+[target.'cfg(target_os = "linux")'.dependencies]
+fontique = { workspace = true, features = ["fontconfig-dlopen"] }
+
+[dev-dependencies]
+# 文档里的例子按应用的写法用门面（`use aureole::prelude::*`）
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole", features = ["testing"] }

@@ -1,0 +1,23 @@
+[package]
+name = "aureole-controls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的基础控件：日期、时间、颜色、文件选择，按钮、复选框、单选组、开关、下拉选择、滑块、进度条、数字输入、标签，只用核心的公开 API 搭成"
+
+[lints]
+workspace = true
+
+[dependencies]
+aureole-core.workspace = true
+reactive.workspace = true
+
+[dev-dependencies]
+# 文档里的例子按应用的写法用门面（`use aureole::prelude::*`）
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole" }

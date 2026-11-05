@@ -1,0 +1,72 @@
+[package]
+name = "aureole"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Rust 桌面应用框架：链式 API 搭界面，细粒度信号驱动更新，GPU 渲染"
+
+[lints]
+workspace = true
+
+# 文档里看得到特性后面的 API
+[package.metadata.docs.rs]
+all-features = true
+
+# 门面：只重新导出各个 crate，加上特性开关。应用只依赖它
+[dependencies]
+aureole-core.workspace = true
+runtime.workspace = true
+controls.workspace = true
+# `testing` 特性
+testing = { workspace = true, optional = true }
+# `devtools` 特性
+devtools = { workspace = true, optional = true }
+# 测试里直接用 tokio（`tokio` 特性才编译）
+tokio = { workspace = true, optional = true }
+
+[features]
+# 默认开分词词典、菜单栏和托盘；不常用、带重依赖的功能由应用自己打开
+default = ["cjk-words", "char-grid", "menus"]
+# 双击选词、Option+方向键在中文、日文里按词走（二进制大约多 2 MB 的词典）；关掉时按字
+cjk-words = ["aureole-core/cjk-words"]
+# 字符网格：`char_grid`、`CharGrid` 和它们的类型（终端、代码编辑器）。用不到的应用可以关掉，少一块代码和 unicode-width
+char-grid = ["aureole-core/char-grid"]
+# 菜单栏和托盘：`Menu`、`Tray`、`App::menu`、`App::tray`（macOS、Windows 用 muda、tray-icon，Linux 的托盘用 ksni）。
+# 关掉时这些 API 不存在，少三个库；macOS 上用窗口库默认的英文应用菜单
+menus = ["runtime/menus"]
+# `font::load` 认得 WOFF2、WOFF：先解压成 TTF / OTF 再登记（release 二进制大约多 260 KB，一半是 Brotli 的内置词典）。
+# 默认关：要加载 WOFF2、WOFF 字体的应用自己打开
+woff2 = ["aureole-core/woff2"]
+# `image()` 认得 SVG 文件。
+# 默认关：要加载 SVG 文件的应用自己打开。路径字符串（`VectorPath::svg`）不需要它
+svg = ["aureole-core/svg"]
+# `spawn_tokio`、`resource_tokio`、`TokioSpawner`、`TokioPlugin`：在 tokio 运行时上跑需要它的库（reqwest、sqlx、tonic……），结果照样交回主线程
+tokio = ["aureole-core/tokio", "runtime/tokio", "dep:tokio"]
+# 测试工具：`aureole::testing`（`Harness`、回放、离屏截图）。只在开发依赖里打开：
+# [dev-dependencies] aureole = { version = "0.0.1-beta.1", features = ["testing"] }
+testing = ["dep:testing"]
+# 开发工具：`aureole::devtools`（文件热加载、重新编译后原地重启、`App::restarts_on_rebuild`）。发布的应用不开，多带一个文件监视的库
+devtools = ["dep:devtools", "runtime/devtools"]
+
+[dev-dependencies]
+# 自己的测试、示例用测试工具和开发工具。开发依赖指向自己：只在编测试、示例时打开这两个特性，普通构建不受影响
+aureole = { path = ".", features = ["testing", "devtools"] }
+# 测试字体是 WOFF2（`tests/fixtures/aureole-fixture.woff2`）：测试里给核心打开 `woff2`，默认特性下也照样跑；应用照样默认关
+aureole-core = { workspace = true, features = ["woff2"] }
+# 测试直接检查渲染器的输入和输出：图元、图集更新、离屏渲染
+render.workspace = true
+scene.workspace = true
+wgpu.workspace = true
+image.workspace = true
+png.workspace = true
+serde_json.workspace = true
+# 测试里按辅助技术的方式读无障碍树
+accesskit.workspace = true
+accesskit_consumer.workspace = true
+# 录制台（`examples/input_lab.rs`）装上订阅者，录制的开始和结束照样打印在终端
+tracing-subscriber = { workspace = true, features = ["fmt", "std", "ansi"] }

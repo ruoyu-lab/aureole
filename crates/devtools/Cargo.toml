@@ -1,0 +1,26 @@
+[package]
+name = "aureole-devtools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的开发工具：监视文件热加载，文件保存后信号和图片跟着变"
+
+[lints]
+workspace = true
+
+[dependencies]
+aureole-core.workspace = true
+reactive.workspace = true
+# 监视文件：macOS 上用 FSEvents
+notify.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# 文档里的例子按应用的写法用门面（`use aureole::prelude::*`）
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole", features = ["devtools"] }

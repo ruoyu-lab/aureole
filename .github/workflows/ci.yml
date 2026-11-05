@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 工具链
+        run: rustup toolchain install 1.98.0 --profile minimal --component clippy && rustup default 1.98.0
+      - name: Linux 的系统库
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxcursor-dev libxrandr-dev libxi-dev libx11-xcb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 文档里的例子
+        run: cargo test --workspace --doc

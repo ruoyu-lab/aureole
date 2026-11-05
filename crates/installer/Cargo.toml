@@ -1,0 +1,39 @@
+[package]
+name = "aureole-installer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "用 Aureole 写安装程序：包格式、解压、回滚、升级、卸载、系统集成，默认的向导界面，少见的需求有扩展接口"
+
+[lints]
+workspace = true
+
+[features]
+# 界面：Session 和默认的向导。打包工具只要包格式，不用带上框架
+default = ["ui"]
+ui = ["dep:aureole"]
+
+[dependencies]
+flate2.workspace = true
+serde_json.workspace = true
+# 不要默认特性：分词词典、字符网格、菜单栏安装程序都用不到，少几 MB
+aureole = { path = "../aureole", version = "0.0.1-beta.1", optional = true, default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_UI_Shell"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Storage_EnhancedStorage", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+
+[dev-dependencies]
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole", default-features = false, features = ["testing"] }
+
+# 默认的安装程序：不写自己的安装程序时，打包工具用它
+[[bin]]
+name = "aureole-setup"
+path = "src/bin/aureole-setup.rs"
+required-features = ["ui"]

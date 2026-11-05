@@ -1,0 +1,68 @@
+[package]
+name = "aureole-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的平台层：平台后端接口、帧时钟、系统集成（剪贴板、文件对话框、通知、外观）、单实例、本进程的资源用量"
+
+[lints]
+workspace = true
+
+[dependencies]
+raw-window-handle.workspace = true
+tracing.workspace = true
+# 剪贴板（纯文字；Linux 上还有图片和文件列表）：整个进程只建一个实例，运行时经后端用它
+arboard.workspace = true
+
+# 本进程的资源用量（常驻内存、CPU 时间、唤醒次数）、单实例的锁和套接字
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSString", "NSObject", "NSProcessInfo", "NSGeometry", "NSLocale", "NSArray", "NSURL", "NSUserDefaults", "NSBundle", "NSError", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSDate", "NSOperation", "block2", "NSData", "NSDictionary", "NSSet"] }
+objc2-app-kit = { workspace = true, features = ["NSView", "NSResponder", "NSWindow", "NSEvent", "NSGraphics", "NSApplication", "NSMenu", "NSMenuItem", "objc2-quartz-core", "NSPanel", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSAccessibility", "block2", "objc2-uniform-type-identifiers", "NSDragging", "NSDraggingItem", "NSDraggingSession", "NSImage", "NSPasteboard", "NSPasteboardItem", "NSGraphicsContext", "NSColor", "NSColorSpace", "objc2-core-foundation", "NSRunningApplication", "NSAlert", "NSVisualEffectView", "NSButton", "NSControl", "NSBitmapImageRep", "NSImageRep"] }
+objc2-quartz-core = { workspace = true, features = ["CADisplayLink", "CAFrameRateRange", "CALayer", "objc2-core-foundation"] }
+# 文件对话框、系统通知
+block2.workspace = true
+objc2-uniform-type-identifiers = { workspace = true, features = ["UTType"] }
+objc2-user-notifications = { workspace = true, features = ["block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationContent", "UNNotificationTrigger", "UNNotificationSound"] }
+
+# Windows：用户界面语言、减少动态效果、注册表里的外观和强调色、打开文件和网址、在资源管理器里选中、
+# 通知要的应用标识（AppUserModelID）、本进程的资源用量、单实例（命名互斥量和命名管道）；文件对话框是 COM 接口、通知是 WinRT，用 windows（类型安全的接口）
+[target.'cfg(target_os = "windows")'.dependencies]
+# 帧时钟：性能计数器（统一时钟域）、运行时找 dcomp.dll 里的合成器时钟（Windows 10 没有，不能直接导入）；
+# 垂直消隐的退路用 DXGI 的输出（windows 的 Win32_Graphics_Dxgi、Win32_Graphics_Gdi，wgpu 已经用了同一版）
+windows-sys = { workspace = true, features = ["Win32_System_SystemInformation", "Win32_Foundation", "Win32_Globalization", "Win32_UI_WindowsAndMessaging", "Win32_System_Registry", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_Storage_Packaging_Appx", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Pipes", "Win32_System_IO", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Performance", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
+windows = { workspace = true, features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Storage_EnhancedStorage", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "UI_Notifications", "Data_Xml_Dom", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Graphics_DirectComposition", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_HiDpi", "Foundation"] }
+# 自己实现 COM 接口（拖放目标）：`implement` 宏生成的代码写的是这个名字。和 windows 同一版，已经在依赖树里
+windows-core.workspace = true
+
+# Linux：XDG 门户（文件对话框、外观设置）、通知、文件管理器都走 D-Bus；
+# Wayland 的帧时钟挂在窗口库的连接上（libwayland-client 运行时加载，和窗口库用同一版）
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+wayland-client = { workspace = true, features = ["system", "dlopen"] }
+# 托盘走 D-Bus 上的 StatusNotifierItem（ksni，纯 Rust）；`menus` 特性
+ksni = { workspace = true, features = ["async-io", "blocking"], optional = true }
+
+# macOS、Windows 的图片和文件列表直接调系统（一次放几种格式 arboard 做不到）；别的系统走 arboard，要它编进图片的部分
+[target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]
+arboard = { workspace = true, features = ["image-data"] }
+
+# 原生菜单栏和托盘（`menus` 特性）：macOS 和 Windows 用 muda、tray-icon（它们在 Linux 上要原生界面工具包的开发包和它的事件循环，Linux 不用）
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+muda = { workspace = true, optional = true }
+tray-icon = { workspace = true, optional = true }
+
+[features]
+default = ["menus"]
+# 原生菜单栏和托盘。关掉时后端的 `menu`、`tray` 是 `None`，少三个库
+menus = ["dep:muda", "dep:tray-icon", "dep:ksni"]
+
+# 显示链接的真实测试要在主线程上跑（开窗口、跑运行循环），测试框架把测试放在别的线程，所以不用测试框架

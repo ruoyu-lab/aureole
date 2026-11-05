@@ -1,0 +1,34 @@
+[package]
+name = "aureole-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+description = "Aureole 的测试工具：没有窗口的宿主，手动推进虚拟时间、模拟输入、读状态，回放录下的输入，离屏截图"
+
+[lints]
+workspace = true
+
+[dependencies]
+aureole-core.workspace = true
+# 系统那一侧的替身：平台层的无头后端（剪贴板、打开网址……都是进程内的，记下发生了什么）
+platform.workspace = true
+reactive.workspace = true
+scene.workspace = true
+# 离屏截图
+render.workspace = true
+# 无障碍树的增量（测试按辅助技术的方式读）
+accesskit.workspace = true
+# 测试和演示里生成带色彩配置的图片、HDR 的 PNG
+image.workspace = true
+png.workspace = true
+moxcms.workspace = true
+
+[dev-dependencies]
+# 文档里的例子按应用的写法用门面（`use aureole::prelude::*`）
+# 只写路径不写版本：发布时 cargo 会去掉这条开发依赖，门面依赖这个 crate，写了版本就成了发布不了的循环
+aureole = { path = "../aureole", features = ["testing"] }

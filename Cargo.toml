@@ -1,0 +1,138 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1-beta.1"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+repository = "https://github.com/ruoyu-lab/aureole"
+keywords = ["gui", "ui", "desktop", "framework", "reactive"]
+categories = ["gui"]
+
+# 所有成员共用的 lint（成员里写 `[lints] workspace = true`）。能自动查的规矩都是 deny，不靠 CI 的 `-D warnings` 才拦住
+[workspace.lints.rust]
+# 公开项都要有文档
+missing_docs = "deny"
+# unsafe fn 的函数体不算 unsafe 块，里面的每个 unsafe 操作照样要包在 unsafe 块里、写上理由
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# 每个 unsafe 块、unsafe impl 前面写 `// SAFETY:`，说明为什么这里满足前提
+undocumented_unsafe_blocks = "deny"
+# 渲染、排版的内部函数参数多是常态，拆成结构体反而难读
+too_many_arguments = "allow"
+# 调试打印、没写完的分支不进提交
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[workspace.lints.rustdoc]
+# 文档里的 [`链接`] 必须指向存在的项
+broken_intra_doc_links = "deny"
+
+[workspace.dependencies]
+# 发布到 crates.io 时路径依赖要换成版本号，所以两样都写
+scene = { path = "crates/scene", package = "aureole-scene", version = "0.0.1-beta.1" }
+render = { path = "crates/render", package = "aureole-render", version = "0.0.1-beta.1" }
+# 不开默认特性：菜单栏和托盘的库由门面 aureole 的 `menus` 特性决定（测试工具、演示的公共库都不替应用打开）
+platform = { path = "crates/platform", package = "aureole-platform", version = "0.0.1-beta.1", default-features = false }
+animation = { path = "crates/animation", package = "aureole-animation", version = "0.0.1-beta.1" }
+reactive = { path = "crates/reactive", package = "aureole-reactive", version = "0.0.1-beta.1" }
+# 核心的包名是 aureole-core，不设短名（短名 core 会遮住 Rust 自带的 core），框架内部写全名 aureole_core。
+# 不开默认特性：分词词典、WOFF2 由门面 aureole 的特性决定（运行时、控件、测试工具都不替应用打开）
+aureole-core = { path = "crates/core", version = "0.0.1-beta.1", default-features = false }
+runtime = { path = "crates/runtime", package = "aureole-runtime", version = "0.0.1-beta.1", default-features = false }
+controls = { path = "crates/controls", package = "aureole-controls", version = "0.0.1-beta.1" }
+testing = { path = "crates/testing", package = "aureole-testing", version = "0.0.1-beta.1" }
+devtools = { path = "crates/devtools", package = "aureole-devtools", version = "0.0.1-beta.1" }
+aureole = { path = "crates/aureole", version = "0.0.1-beta.1" }
+# 演示的公共库（不发布）：演示里统一用短名 support
+wgpu = "30"
+# 着色器解析（render 的测试用）：和 wgpu 用的是同一版
+naga = "30"
+winit = "0.30"
+accesskit = "0.25"
+accesskit_winit = "0.34"
+accesskit_consumer = "0.39"
+# 修饰键、按着的指针键的位标志；按键的文字（短的放在栈上）、一个窗口事件换算出的几个输入事件：都和 winit 用同一版
+bitflags = "2"
+smol_str = "0.2"
+smallvec = "1"
+# 属性注册表的宏拼名字（`background` → 键 `BACKGROUND`、`Property::Background`）
+pastey = "0.2"
+# 录下的输入（每行一个 JSON）：只用它的 Value，不用派生宏；打包工具已经用了同一版
+serde_json = "1"
+# 安装包的压缩：纯 Rust 的后端，不用 C 编译器（`aureole-installer`）
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# 运行中发现的情况（功能失败、用法和环境问题、生命周期提示）：框架只记录，不替应用装订阅者。winit 已经用了同一版
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false }
+pollster = "1"
+slotmap = "1"
+parley = "0.12"
+# 中日文分词：和 parley 用的是同一版 ICU4X
+icu_segmenter = { version = "2", default-features = false }
+icu_provider = { version = "2", default-features = false }
+# Linux 的系统字体：parley 已经用了同一版
+fontique = { version = "0.12", default-features = false }
+# 字符网格里一个字占几格（汉字、emoji 两格）；wgpu 的着色器编译已经用到同一版
+unicode-width = "0.2"
+# WOFF2、WOFF 字体解压成 SFNT 再登记：纯 Rust，Brotli 解压器和 WOFF 用的 zlib 解压
+wuff = { version = "0.2", default-features = false }
+swash = "0.2"
+zeno = "0.3"
+muda = { version = "0.21", default-features = false }
+tray-icon = { version = "0.26", default-features = false }
+arboard = { version = "3", default-features = false }
+# Linux 的托盘：纯 Rust，用的是 accesskit 已经带进来的同一版 zbus
+ksni = { version = "0.3", default-features = false }
+# 监视文件（开发工具的热加载）：macOS 上用 FSEvents
+notify = "8"
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox", "grid", "content_size"] }
+bytemuck = { version = "1", features = ["derive"] }
+png = "0.18"
+# 图片解码：只开 PNG、JPEG、WebP、GIF
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# 图片的色彩配置（ICC）：解析配置和传递曲线。纯 Rust，image 已经用了同一版，不多一份
+moxcms = "0.8"
+# 解析 SVG 文件（门面的 `svg` 特性）：只用它解析和把文字转成路径，渲染走框架自己的矢量路径。
+# `text` 排文字，`system-fonts`、`memmap-fonts` 找系统字体，`svgz` 读压缩的 SVG
+usvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz"] }
+# 半精度浮点：广色域、HDR 图片的纹理，离屏读回浮点像素。naga 已经用了同一版（同样不开默认特性）
+half = { version = "2", default-features = false }
+raw-window-handle = "0.6"
+# 和 tokio 的生态一起用（aureole 的 `tokio` 特性）
+tokio = { version = "1.47", default-features = false }
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["std"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std"] }
+block2 = "0.6"
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std"] }
+# Windows 系统调用：和 muda、arboard 用同一版
+windows-sys = "0.61"
+# Windows 的 COM 接口（文件对话框）和 WinRT（通知）：和 accesskit、wgpu、fontique 用同一版，不多一份
+windows = { version = "0.62", default-features = false, features = ["std"] }
+windows-core = { version = "0.62", default-features = false, features = ["std"] }
+# Linux 的 D-Bus（XDG 门户、通知、文件管理器）：纯 Rust，accesskit 已经用了同一版
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# Wayland 表面的帧回调（帧时钟）：挂在窗口库的连接上，libwayland-client 运行时加载。winit 已经用了同一版
+wayland-client = { version = "0.31", default-features = false }
+
+# wgpu 在未优化的依赖下非常慢，开发时也把依赖编成 release
+[profile.dev.package."*"]
+opt-level = 3
+
+# 发布构建（框架自己的基准、演示）：编成一个代码生成单元，比默认的 16 个快约 5%，而且耗时不随无关代码的划分跳动，
+# 基准才比得出一两个百分点的差别；跨 crate 的内联靠 thin LTO。fat LTO 只再快约 2%，留给打包发布。
+# 用框架写的应用不继承这里的配置
+[profile.release]
+codegen-units = 1
+lto = "thin"
+# 性能分析工具看得到函数名和行号，不影响生成的代码
+debug = "line-tables-only"
