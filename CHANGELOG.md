@@ -1,5 +1,16 @@
 # 更新记录
 
+## 未发布
+
+### 新增
+
+- 拖放时跟着指针走的样子能限制位移（见教程第 11 章）：`drag_preview_axis(Direction::Row)` 只横着走、`Direction::Column` 只竖着走，`drag_preview_contained(true)` 碰到父元素的边就停住。横着的标签条、看板的列排序时不再上下飘，也不会被裁剪的父元素切掉一半。影子和抬起都生效，找放置目标照样看指针。
+- 平台层：`WindowService::run_outside_event_callback`，等这次系统事件处理完、在窗口库的事件回调外面执行（有默认实现：直接执行）。
+
+### 修正
+
+- macOS 上双击拖动区域、`WindowHandle::set_maximized` 缩放窗口时，动画的约 0.35 秒里内容停着不动，结束后才一下跳到新的大小。现在缩放动画的每一步都按新的大小出一帧，`is_maximized` 在缩放中保持设的值。
+
 ## 0.0.1-beta.1
 
 第一个公开的测试版。API 还会改，第一个正式版之前任何版本都可能有破坏性改动。

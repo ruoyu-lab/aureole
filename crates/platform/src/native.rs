@@ -407,6 +407,13 @@ impl WindowService for NativeBackend {
         TitleBarAction::Zoom
     }
 
+    fn run_outside_event_callback(&self, f: Box<dyn FnOnce()>) {
+        #[cfg(target_os = "macos")]
+        imp::run_outside_event_callback(f);
+        #[cfg(not(target_os = "macos"))]
+        f();
+    }
+
     fn set_window_backdrop(&self, window: &dyn HasWindowHandle, backdrop: WindowMaterial) -> Result<(), PlatformError> {
         #[cfg(target_os = "macos")]
         return crate::title_bar::macos::set_backdrop(window, backdrop);

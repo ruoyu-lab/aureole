@@ -414,7 +414,15 @@ impl WindowHandle {
 
     /// 最大化或还原
     pub fn set_maximized(self, maximized: bool) {
-        self.with_window(move |w| w.set_maximized(maximized));
+        // macOS 的缩放动画在调用里同步跑完，要在窗口库的事件回调外面开始，动画的每一步才收得到改大小的事件、出得了帧
+        self.with_window(move |_| {
+            crate::system::backend().window().run_outside_event_callback(Box::new(move || {
+                let Some(window) = native(self) else { return };
+                ZOOMING.with(|z| z.set(Some(self)));
+                window.set_maximized(maximized);
+                ZOOMING.with(|z| z.set(None));
+            }));
+        });
         if let Some(state) = self.state() {
             state.maximized.set_if_changed(maximized);
         }
@@ -503,6 +511,8 @@ struct Registry {
 
 thread_local! {
     static REGISTRY: RefCell<Registry> = RefCell::default();
+    /// 正在按 [`WindowHandle::set_maximized`] 缩放的窗口（macOS 上缩放动画同步跑完，期间不断收到改大小的事件）
+    static ZOOMING: Cell<Option<WindowHandle>> = const { Cell::new(None) };
 }
 
 fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
@@ -522,6 +532,11 @@ pub(crate) fn take_requests() -> Vec<Request> {
 
 pub(crate) fn state(handle: WindowHandle) -> Option<State> {
     handle.state()
+}
+
+/// 窗口正在按 [`WindowHandle::set_maximized`] 缩放：动画的中间几步窗口还不算最大化，不要拿来改已经设好的 `is_maximized`
+pub(crate) fn is_zooming(handle: WindowHandle) -> bool {
+    ZOOMING.with(|z| z.get() == Some(handle))
 }
 
 /// 已经创建的窗口（给需要原生窗口的系统功能，比如作为文件对话框的父窗口）

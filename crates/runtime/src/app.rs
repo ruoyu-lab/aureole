@@ -1462,7 +1462,9 @@ fn sync_state(handle: WindowHandle, window: &winit::window::Window) {
         state.position.set([position.x, position.y]);
     }
     state.fullscreen.set(window.fullscreen().is_some());
-    state.maximized.set_if_changed(window.is_maximized());
+    if !window::is_zooming(handle) {
+        state.maximized.set_if_changed(window.is_maximized());
+    }
     // 不告诉（Wayland）时留着最后一次设的值
     if let Some(minimized) = window.is_minimized() {
         state.minimized.set_if_changed(minimized);

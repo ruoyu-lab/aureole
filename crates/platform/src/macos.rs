@@ -1,13 +1,15 @@
 //! macOS 上窗口和运行环境的几项服务（AppKit）：指针位置、首选语言、
-//! 带到最前面、打包后的应用名、显示器的颜色能力、低电量模式、密码框的安全输入。由 [`crate::NativeBackend`] 调用。
+//! 带到最前面、打包后的应用名、显示器的颜色能力、低电量模式、密码框的安全输入、投递到运行循环。由 [`crate::NativeBackend`] 调用。
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{MainThreadMarker, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventType, NSView};
-use objc2_foundation::NSProcessInfo;
+use objc2_foundation::{NSArray, NSProcessInfo, NSRunLoop, NSRunLoopCommonModes};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// 指针此刻在窗口内容区里的位置（逻辑像素，左上角为原点），也可能在窗口外（负数或超出大小）。
@@ -79,6 +81,27 @@ pub fn activate_if_unpackaged() -> bool {
         window.makeKeyAndOrderFront(None);
     }
     true
+}
+
+/// 投递到主线程的运行循环（common 模式），这次系统事件处理完、运行循环下一次转起来时执行 `f`，不在窗口库的事件回调里。
+/// 不在主线程时直接执行
+pub fn run_outside_event_callback(f: Box<dyn FnOnce()>) {
+    if MainThreadMarker::new().is_none() {
+        f();
+        return;
+    }
+    let f = Cell::new(Some(f));
+    let block = RcBlock::new(move || {
+        if let Some(f) = f.take() {
+            f();
+        }
+    });
+    // SAFETY: NSRunLoopCommonModes 是 Foundation 导出的不可变常量；上面确认了在主线程，块投递到的正是主线程的运行循环，
+    // 闭包不会到别的线程上执行
+    unsafe {
+        let modes = NSArray::from_slice(&[NSRunLoopCommonModes]);
+        NSRunLoop::mainRunLoop().performInModes_block(&modes, &block);
+    }
 }
 
 /// 现在正在处理的系统事件是不是滚轮事件

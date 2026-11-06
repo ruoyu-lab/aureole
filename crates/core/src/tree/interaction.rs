@@ -43,6 +43,10 @@ pub(crate) struct NodeInput {
     pub drag_drop: Option<Rc<crate::drag_drop::DragDropSpec>>,
     /// 拖动时跟着指针走的样子（属性 `drag_preview`）
     pub drag_preview: crate::drag_drop::DragPreview,
+    /// 跟着指针走的样子只沿这个方向走（属性 `drag_preview_axis`），`None` 是两个方向都走
+    pub drag_preview_axis: Option<Direction>,
+    /// 跟着指针走的样子不出父元素（属性 `drag_preview_contained`）
+    pub drag_preview_contained: bool,
     /// 设了属性 `window_drag_area`：是不是窗口的拖动区域（见 `route/window_drag.rs`）
     pub window_drag_area: Option<bool>,
 }

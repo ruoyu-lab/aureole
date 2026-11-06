@@ -400,6 +400,13 @@ pub trait WindowService: Send + Sync {
         TitleBarAction::Zoom
     }
 
+    /// 等这次系统事件处理完，在窗口库的事件回调外面执行 `f`（主线程）。
+    /// macOS 上窗口缩放的动画在调用里同步跑完：在窗口库的回调里开始的话，动画期间窗口改大小的事件被窗口库攒到回调返回才交出来，
+    /// 这期间一帧也出不了。所以投递到主线程的运行循环，下一次转起来时执行。别的平台没有这回事，直接执行
+    fn run_outside_event_callback(&self, f: Box<dyn FnOnce()>) {
+        f();
+    }
+
     /// 窗口背后的材质。不支持时返回"不支持"，窗口照常不透明
     fn set_window_backdrop(&self, window: &dyn HasWindowHandle, backdrop: WindowMaterial) -> Result<(), PlatformError> {
         let _ = (window, backdrop);

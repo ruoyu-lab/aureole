@@ -3,7 +3,8 @@
 //!
 //! 影子（[`DragPreview::Copy`]）是源元素的子树在最上面再画一遍：放在一个单独的合成层里，层的偏移跟着指针，
 //! 拖的时候不重新布局、不重画；源元素自己变淡（它的层的透明度）。抬起（[`DragPreview::Lift`]）是源元素自己的合成层
-//! 加一个额外平移（和滚动偏移同一个字段），叠在兄弟上面。
+//! 加一个额外平移（和滚动偏移同一个字段），叠在兄弟上面。两种都按开始拖时源元素的设置限制位移（只沿一个方向、不出父元素），
+//! 在父元素坐标里算；找放置目标、自动滚动只看指针。
 
 use std::any::Any;
 use std::cell::Cell;
@@ -19,6 +20,7 @@ use crate::compositor::{DerivedLayer, LayerInfo, LayerTrack, LayerValues};
 use crate::drag_drop::{DragDropSpec, DragOut, DragPreview, DropEvent};
 use crate::geometry::Affine;
 use crate::handlers::{EventType, Handler, On};
+use crate::layout::Direction;
 
 /// 影子的透明度
 const GHOST_OPACITY: f32 = 0.85;
@@ -114,6 +116,10 @@ pub(crate) struct Session {
     over: Option<[f32; 2]>,
     /// 源元素也能拖到应用外面：拖出窗口时交给系统
     out: bool,
+    /// 影子、抬起的元素只沿这个方向走（属性 `drag_preview_axis`）
+    axis: Option<Direction>,
+    /// 影子、抬起的元素不出父元素（属性 `drag_preview_contained`）
+    contained: bool,
 }
 
 /// 影子：源元素的子树在最上面的合成层里再画一遍
@@ -208,7 +214,8 @@ pub(super) fn start(tree: &TreeRef, node: NodeId, press: [f32; 2]) {
     let mut t = tree.borrow_mut();
     t.finish_preview();
     let Some(origin) = t.screen_origin(node, true) else { return };
-    let mut preview = t.node_input(node).map_or(DragPreview::Copy, |i| i.drag_preview);
+    let (mut preview, axis, contained) =
+        t.node_input(node).map_or((DragPreview::Copy, None, false), |i| (i.drag_preview, i.drag_preview_axis, i.drag_preview_contained));
     if preview == DragPreview::Lift && !t.can_lift(node) {
         preview = DragPreview::Copy;
     }
@@ -239,7 +246,8 @@ pub(super) fn start(tree: &TreeRef, node: NodeId, press: [f32; 2]) {
         DragPreview::None => {}
     }
     let out = spec.drag_out.is_some();
-    t.drag_drop.session = Some(Box::new(Session { source: node, data, grab: sub(press, origin), target: None, over: None, out }));
+    let session = Session { source: node, data, grab: sub(press, origin), target: None, over: None, out, axis, contained };
+    t.drag_drop.session = Some(Box::new(session));
 }
 
 /// 指针移动了（或者内容在指针下滚过去了）：影子、抬起的元素跟着走，找放置目标，交给它进入、经过、离开。
@@ -439,14 +447,15 @@ impl Tree {
     fn follow(&mut self, point: [f32; 2]) {
         let Some(grab) = self.drag_drop.session.as_ref().map(|s| s.grab) else { return };
         let screen = sub(point, grab);
-        if let Some(ghost) = self.drag_drop.ghost.as_deref_mut()
-            && matches!(ghost.phase, GhostPhase::Dragging)
-            && ghost.screen != screen
-        {
-            ghost.screen = screen;
-            let offset = sub(screen, ghost.painted);
-            let key = ghost_key(ghost.source);
-            self.commit.offset(key, offset);
+        let dragging = self.drag_drop.ghost.as_deref().filter(|g| matches!(g.phase, GhostPhase::Dragging)).map(|g| g.source);
+        if let Some(source) = dragging {
+            let screen = self.ghost_screen(source, screen);
+            let ghost = self.drag_drop.ghost.as_deref_mut().expect("上面检查过");
+            if ghost.screen != screen {
+                ghost.screen = screen;
+                let offset = sub(screen, ghost.painted);
+                self.commit.offset(ghost_key(source), offset);
+            }
         }
         if let Some(lift) = self.drag_drop.lift.as_deref()
             && lift.settle.is_none()
@@ -456,12 +465,58 @@ impl Tree {
         }
     }
 
-    /// 抬起的元素的左上角放到窗口里的 `screen`：算出额外平移（父元素坐标里的），变了才发给渲染线程
+    /// 影子的左上角想去窗口里的 `screen`：按这次拖动的限制改过的位置
+    fn ghost_screen(&self, id: NodeId, screen: [f32; 2]) -> [f32; 2] {
+        if self.drag_drop.session.as_deref().is_none_or(|s| s.axis.is_none() && !s.contained) {
+            return screen;
+        }
+        let Some(base) = self.screen_origin(id, true) else { return screen };
+        let parent = self.parent_world(id);
+        let (Some(a), Some(b)) = (parent.invert(screen), parent.invert(base)) else { return screen };
+        let [dx, dy] = self.constrain(id, b, sub(a, b));
+        parent.apply([b[0] + dx, b[1] + dy])
+    }
+
+    /// 抬起的元素的左上角放到窗口里的 `screen`（按这次拖动的限制改过）：算出额外平移（父元素坐标里的），变了才发给渲染线程
     fn lift_to(&mut self, id: NodeId, screen: [f32; 2]) {
         let Some(base) = self.screen_origin(id, false) else { return };
         let parent = self.parent_world(id);
         let (Some(a), Some(b)) = (parent.invert(screen), parent.invert(base)) else { return };
-        self.set_shift(id, sub(a, b));
+        let shift = self.constrain(id, b, sub(a, b));
+        self.set_shift(id, shift);
+    }
+
+    /// 按这次拖动的限制改影子、抬起的元素的位移 `shift`（父元素坐标）：只沿一个方向走（另一个方向不动），不出父元素。
+    /// `origin` 是元素左上角此刻在父元素坐标里的位置
+    fn constrain(&self, id: NodeId, origin: [f32; 2], mut shift: [f32; 2]) -> [f32; 2] {
+        let Some(session) = self.drag_drop.session.as_deref() else { return shift };
+        let moves = match session.axis {
+            Some(Direction::Row) => [true, false],
+            Some(Direction::Column) => [false, true],
+            None => [true, true],
+        };
+        for axis in 0..2 {
+            if !moves[axis] {
+                shift[axis] = 0.0;
+            }
+        }
+        let Some(node) = self.nodes.get(id) else { return shift };
+        let Some(parent) = node.parent.and_then(|p| self.nodes.get(p)).filter(|_| session.contained) else { return shift };
+        // 元素相对左上角占的范围：缩放、旋转过的按转过以后的外框
+        let b = node.bounds;
+        let local = Affine::IDENTITY.then_local(b.center(), [0.0; 2], node.paint.scale, node.paint.rotation);
+        let corner = local.apply([b.x, b.y]);
+        let corners = [[b.x, b.y], [b.x + b.width, b.y], [b.x, b.y + b.height], [b.x + b.width, b.y + b.height]].map(|p| sub(local.apply(p), corner));
+        let p = parent.bounds;
+        for axis in (0..2).filter(|&axis| moves[axis]) {
+            let low = corners.iter().map(|c| c[axis]).fold(f32::INFINITY, f32::min);
+            let high = corners.iter().map(|c| c[axis]).fold(f32::NEG_INFINITY, f32::max);
+            let (start, end) = if axis == 0 { (p.x, p.x + p.width) } else { (p.y, p.y + p.height) };
+            // 比父元素还大时在两头对齐之间走
+            let (first, last) = (start - origin[axis] - low, end - origin[axis] - high);
+            shift[axis] = shift[axis].clamp(first.min(last), first.max(last));
+        }
+        shift
     }
 
     fn set_shift(&mut self, id: NodeId, shift: [f32; 2]) {

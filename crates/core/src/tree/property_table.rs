@@ -1329,6 +1329,33 @@ props! {
         reset: [],
     }
 
+    /// 跟着指针走的样子（[`DragPreview::Copy`]、[`DragPreview::Lift`]）只沿一个方向走：`Direction::Row` 只横着走，
+    /// `Direction::Column` 只竖着走，比如横着的标签条、竖着的列表里排序时不跟着指针上下、左右飘。不设时两个方向都跟着指针。
+    /// 方向是父元素的横竖。只管样子，找放置目标、自动滚动照样按指针的位置
+    drag_preview_axis: Direction = Direction::Row => {
+        order: 1262, storage: Interaction, dirty: BEHAVIOR, applies: ANY, inherited: false, anim: [],
+        method: exact, style: false, late: false, bind: typed,
+        write: |t, id, v| {
+            t.with_input(id, |i| i.drag_preview_axis = Some(v));
+        },
+        read: |t, id| t.node_input(id)?.drag_preview_axis,
+        reset: [|t, id| {
+            t.with_input(id, |i| i.drag_preview_axis = None);
+        }],
+    }
+
+    /// 跟着指针走的样子不出父元素：碰到父元素的边就停住，比如标签拖到标签条的一头时不被标签条裁掉。
+    /// 和 [`Element::drag_preview_axis`] 一起用时沿那个方向走到头为止。只管样子，找放置目标照样按指针的位置
+    drag_preview_contained: bool = false => {
+        order: 1264, storage: Interaction, dirty: BEHAVIOR, applies: ANY, inherited: false, anim: [],
+        method: exact, style: false, late: false, bind: typed,
+        write: |t, id, v| {
+            t.with_input(id, |i| i.drag_preview_contained = v);
+        },
+        read: |t, id| Some(t.node_input(id).is_some_and(|i| i.drag_preview_contained)),
+        reset: [],
+    }
+
     // ---- 挂载子元素之后才绑定 ----
 
     /// 绕排的元素和旁边的字之间的距离，默认 12；同一边上下相邻的两个绕排元素之间也隔这么远。只对 [`crate::flow()`] 有效

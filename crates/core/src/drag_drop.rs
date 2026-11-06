@@ -16,7 +16,8 @@ use crate::event::IntoHandler;
 use crate::handlers::{EventType, Handler, owned, owned_ref};
 use crate::input::Modifiers;
 
-/// 拖动时跟着指针走的样子，见 [`Element::drag_preview`]
+/// 拖动时跟着指针走的样子，见 [`Element::drag_preview`]。[`Element::drag_preview_axis`] 让它只沿一个方向走，
+/// [`Element::drag_preview_contained`] 让它不出父元素
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DragPreview {
@@ -25,7 +26,7 @@ pub enum DragPreview {
     #[default]
     Copy,
     /// 元素自己跟着指针走（在它的合成层上），画在兄弟上面；松手后从指针处落到它的新位置。
-    /// 仍在原来的父元素里，会被祖先裁剪：适合在同一个列表里排序
+    /// 仍在原来的父元素里，会被祖先裁剪：适合在同一个列表里排序（父元素裁剪时加上 [`Element::drag_preview_contained`]）
     Lift,
     /// 不显示，应用自己画（用 [`Element::on_drag`] 的位置）
     None,
