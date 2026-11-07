@@ -114,6 +114,7 @@ impl Setup {
         match self.prepare() {
             Ok(Prepared::Handled(code)) => code,
             Ok(Prepared::Window { session, relocated }) => {
+                let session = *session;
                 let title = format!("{} {}", session.manifest().name, session.manifest().version);
                 let configure = self.configure;
                 App::new(move || ui(session))
@@ -178,14 +179,14 @@ impl Setup {
         session.menu_shortcut().set(!command.no_menu_shortcut);
         session.desktop_shortcut().set(!command.no_desktop_shortcut);
         let relocated = command.relocated.then(|| session.directory().get_untracked());
-        Ok(Prepared::Window { session, relocated })
+        Ok(Prepared::Window { session: Box::new(session), relocated })
     }
 }
 
 enum Prepared {
     Handled(ExitCode),
     Window {
-        session: Session,
+        session: Box<Session>,
         /// 这是卸载程序拷到临时目录的那份：结束时收拾这个目录
         relocated: Option<PathBuf>,
     },

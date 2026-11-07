@@ -25,7 +25,9 @@ pub(crate) use text::LINK_KEY;
 pub(crate) use text_runs::clusters;
 
 use super::{NodeId, Tree, TreeRef};
+use crate::canvas::{CanvasTextMetrics, TextMeasurer};
 use crate::gradient::Fill;
+use crate::text::TextStyle;
 use crate::kinds::{ElementKind, KindHooks, NextFrame, PaintContext, TickContext, UpdateContext};
 use crate::property::registry::Dirty;
 
@@ -263,6 +265,16 @@ pub(crate) fn flush_updates(tree: &TreeRef) -> bool {
     if jobs.is_empty() {
         return false;
     }
+    // 画布在树外画，量文字时才短暂借一下树里的文字系统（这时没有别的借用）
+    let measure: TextMeasurer = {
+        let tree = tree.clone();
+        Rc::new(move |content: &str, style: &TextStyle| {
+            let mut layout = tree.borrow_mut().text.build(content, style);
+            layout.break_all_lines(None);
+            let baseline = layout.lines().next().map_or(0.0, |line| line.metrics().baseline);
+            CanvasTextMetrics { width: layout.width(), height: layout.height(), baseline }
+        })
+    };
     for job in jobs {
         let Job { id, size, scale, scope, invalid, old } = job;
         if let Some(old) = old {
@@ -275,12 +287,12 @@ pub(crate) fn flush_updates(tree: &TreeRef) -> bool {
         let slot: Rc<RefCell<Option<Box<dyn ElementKind>>>> = Rc::new(RefCell::new(Some(kind)));
         let dirty = Rc::new(Cell::new(Dirty::PAINT));
         reactive::batch(|| {
-            let (inside, flag, first) = (slot.clone(), dirty.clone(), Cell::new(true));
+            let (inside, flag, first, measure) = (slot.clone(), dirty.clone(), Cell::new(true), measure.clone());
             let make = move || {
                 Effect::new(move || {
                     if first.replace(false) {
                         if let Some(kind) = inside.borrow_mut().as_mut() {
-                            let mut cx = UpdateContext { size, scale, dirty: Dirty::PAINT };
+                            let mut cx = UpdateContext { size, scale, dirty: Dirty::PAINT, text: Some(measure.clone()) };
                             kind.update(&mut cx);
                             flag.set(cx.dirty);
                         }

@@ -88,7 +88,7 @@ pub use scene::ColorSpace;
 pub use vector::{LineCap, LineJoin, VectorPath, VectorPathBuilder, Stroke};
 pub use resource::{Resource, debounced, resource};
 pub use responsive::{SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size};
-pub use system::{Appearance, Conventions, clipboard, conventions, local_date_time, open_url, today, is_motion_reduced, system_accent_color, system_appearance};
+pub use system::{Appearance, Conventions, DisplayInfo, clipboard, conventions, displays, local_date_time, open_url, today, is_motion_reduced, system_accent_color, system_appearance};
 pub use task::{
     BlockingJob, LocalTask, MainThreadSender, PoolSpawner, SendFuture, Sleep, Spawner, Task, main_thread_sender,
     set_spawner, sleep, spawn, spawn_blocking, spawn_local, spawner,
@@ -117,14 +117,14 @@ pub use input::{
     PhysicalKey, PointerId, PointerInput, PointerKind, WheelDelta, WheelInput,
 };
 pub use property::{IntoProp, Prop};
-pub use reactive::{Effect, Memo, Scope, Signal, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, untracked};
+pub use reactive::{Effect, Memo, Scope, Signal, StoredValue, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, stored_value, untracked};
 pub use scene::{Angle, Color, WideColor, deg, ms, rad, secs, turns};
 pub use scroll::{ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit};
 pub use virtual_list::{IntoListSource, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list};
 pub use geometry::Rect;
 pub use layout::{Align, Direction, Justify};
 pub use shadow::{Shadow, Shadows};
-pub use canvas::{Canvas, CanvasHits, CanvasTextStyle, Drawing, canvas};
+pub use canvas::{Canvas, CanvasHits, CanvasTextMetrics, CanvasTextStyle, Drawing, canvas};
 pub use clock::{AnimationClock, animation_clock};
 pub use tree::{ElementProps, FrameStats, without_animation};
 
@@ -167,9 +167,9 @@ pub mod prelude {
     pub use crate::{
         Date, Time, Weekday, today,
         Align, Color, ColorSpace, Direction, Easing, Effect, Element, Fill, Gradient, ImageFit, PlaybackHandle, ImageSource, ImageState, RgbaImage,
-        IntoProp, Justify, LineCap, LineJoin, Memo, VectorPath, Property, Rect, Shadow, Shader, Signal, Spring, Stroke, WideColor,
-        Tween, View, batch, column, flow, image, memo, path, rect, rich_text, row, signal, span, text, text_area, text_field,
-        Canvas, CanvasHits, CanvasTextStyle, canvas, Shadows,
+        IntoProp, Justify, LineCap, LineJoin, Memo, VectorPath, Property, Rect, Shadow, Shader, Signal, Spring, StoredValue, Stroke, WideColor,
+        Tween, View, batch, column, flow, image, memo, path, rect, rich_text, row, signal, span, stored_value, text, text_area, text_field,
+        Canvas, CanvasHits, CanvasTextMetrics, CanvasTextStyle, canvas, Shadows,
         untracked, InlineAlign, Span, SubmitKey, TextAlign, ScrollHandle, measured, scroll, scroll_x, scroll_y, scroll_y_fit, virtual_list,
     };
     // 滤镜、混合模式、遮罩
@@ -194,8 +194,8 @@ pub mod prelude {
     // 按窗口大小切换：尺寸档、断点
     pub use crate::{SizeClass, is_window_at_least, responsive, window_size_class};
     pub use crate::{Appearance, Resource, is_motion_reduced, resource, spawn, spawn_blocking, spawn_local, system_appearance};
-    // 登记收成守卫（`every(..).guard()`）
-    pub use crate::Cancel;
+    // 定时器，登记收成守卫（`every(..).guard()`）
+    pub use crate::{Cancel, after, every};
     // 无障碍：角色、实时区域
     pub use crate::{Live, Role};
     // 字符网格

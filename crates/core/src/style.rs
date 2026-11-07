@@ -24,7 +24,8 @@ use crate::property::{IntoProp, Prop, Property};
 /// 样式对象按哪种状态换值。几个状态同时成立时，**排在后面的优先**：
 /// 悬停 < 焦点 < 按下 < 选中 < 勾选 < 打开 < 禁用。
 /// 嵌套写的（同时满足几个状态，比如"勾选并且悬停"）先比其中最靠后的那个，一样时再比下一个，所以
-/// "勾选并且悬停"优先于只写了"勾选"的，"勾选并且按下"又优先于"勾选并且悬停"。禁用时不算悬停和按下
+/// "勾选并且悬停"优先于只写了"勾选"的，"勾选并且按下"又优先于"勾选并且悬停"。禁用时不算悬停和按下。
+/// 这是一个样式对象里的；后面再用的样式对象写了"勾选"时，前面的"勾选并且悬停"让给它（见 [`Style::extend`]）
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum State {
     /// 指针在上面（含子元素）
@@ -62,6 +63,8 @@ pub const PRESSED: u16 = State::Pressed.bit();
 pub(crate) const DISABLED: u16 = State::Disabled.bit();
 /// 元素自己能记的状态：悬停、焦点、按下、禁用
 pub const TRACKABLE: u16 = HOVERED | FOCUSED | PRESSED | DISABLED;
+/// 交互的反馈：悬停、焦点、按下。它们是某种样子上的变化，不是另一种样子（[`Style::extend`] 按它让）
+const FEEDBACK: u16 = HOVERED | FOCUSED | PRESSED;
 
 /// 样式对象按哪些状态切换：每种状态一个响应式的读取（信号、派生值、闭包），或者固定的 `true` / `false`。
 /// 克隆只加引用计数。
@@ -351,8 +354,9 @@ fn holds(el: &Element, id: PropId, identity: *const ()) -> bool {
 /// - 状态：`.hovered(|s| ..)`、`.pressed(..)`、`.focused(..)`、`.disabled(..)`，控件的部位还有 `.checked(..)`、
 ///   `.selected(..)`、`.open(..)`；可以嵌套（`.checked(|s| s.hovered(..))` 是"勾选并且悬停"）。
 ///   同时成立时谁优先见 [`State`]。状态一变属性立即换成新值；元素（或样式对象）声明了过渡（`.transition(..)`）时按过渡变过去。
-/// - 合起来：`a + &b`（或 `a.extend(&b)`）按属性、按状态逐个合：`b` 设了的值盖过 `a` 在同一个状态下的值，
-///   `a` 别的状态下的值留着。`a` 不变。
+/// - 合起来：`a + &b`（或 `a.extend(&b)`）按属性、按状态逐个合：`b` 在某个状态下设了的值，盖过 `a` 在这个状态、
+///   以及这个状态再加上悬停、焦点、按下时的值（`b` 写了"勾选"，`a` 的"勾选并且悬停"也让给它；`b` 只写了平时的值，
+///   `a` 悬停、按下时的也让掉）；`a` 在勾选、选中、展开、禁用这些别的样子下的值留着。`a` 不变。
 /// - 用到元素上：[`Element::style`]，见那里的先后规则。
 ///
 /// 只在某个状态下设、平时没设的属性，平时用元素上原来的值；元素上也没有时用默认值
@@ -518,7 +522,10 @@ impl Style {
 
     // ---- 合起来 ----
 
-    /// 合进 `other`：按属性、按状态逐个合，`other` 设了的值盖过这里同一个状态下的；过渡和 `.chain(..)` 接在后面
+    /// 合进 `other`：按属性、按状态逐个合。`other` 在某个状态下（平时也算）设了的属性，这里同一个状态、
+    /// 以及这个状态再加上悬停、焦点、按下的组合下的值都让给它：`other` 写了"勾选"，这里的"勾选并且悬停"不再生效；
+    /// `other` 只写了平时的值，这里悬停、按下时的值也让掉。勾选、选中、展开、禁用是别的样子，这里写了的留着。
+    /// 过渡和 `.chain(..)` 接在后面
     pub fn extend(mut self, other: &Style) -> Self {
         let Some(other) = &other.0 else { return self };
         if self.0.is_none() {
@@ -526,6 +533,14 @@ impl Style {
             return self;
         }
         let inner = self.inner();
+        for decl in &other.base {
+            inner.yield_layers(decl.id, 0);
+        }
+        for layer in &other.layers {
+            for decl in &layer.decls {
+                inner.yield_layers(decl.id, layer.mask);
+            }
+        }
         for decl in &other.base {
             put(&mut inner.base, decl.clone());
         }
@@ -564,6 +579,17 @@ impl Style {
 }
 
 impl Inner {
+    /// 后面的样式对象在 `mask` 这个状态下设了 `id`：这里这个状态、和它再加上悬停、焦点、按下的组合下的 `id` 去掉
+    /// （空了的层也去掉）。多出勾选、选中、展开、禁用的组合是别的样子，留着
+    fn yield_layers(&mut self, id: PropId, mask: u16) {
+        for layer in &mut self.layers {
+            if layer.mask & mask == mask && layer.mask & !mask & !FEEDBACK == 0 {
+                layer.decls.retain(|d| d.id != id);
+            }
+        }
+        self.layers.retain(|l| !l.decls.is_empty() || !l.animations.is_empty());
+    }
+
     fn merge_layer(&mut self, mask: u16, decls: &[Decl], animations: &[(Property, Curve)]) {
         // 空的层（只用来嵌套的外层）不记：不然元素会白记一个用不到的状态
         if decls.is_empty() && animations.is_empty() {
@@ -761,8 +787,8 @@ impl Element {
     ///
     /// 和其他链式方法一样**后调用的算数**，一种属性一种属性地看：
     /// - 链式方法（`.background(..)`）设的值在所有状态下都是它：换掉前面样式对象给这个属性的平时的值和各状态下的值；
-    /// - 样式对象设的值按状态合：它给了平时的值就换掉前面的平时的值（链式方法设的也算平时的值），
-    ///   它给了某个状态下的值就换掉前面同一个状态下的值，前面别的状态下的值留着。
+    /// - 样式对象设的值按状态合（同 [`Style::extend`]）：它给了某个状态下的值（平时也算；链式方法设的也算平时的值），
+    ///   就换掉前面在这个状态、以及这个状态再加上悬停、焦点、按下时的值；前面在勾选、选中、展开、禁用这些别的样子下的值留着。
     ///   所以 `.style(&a).style(&b)` 和 `.style(&(a + &b))` 一样；
     /// - 基础控件默认的样子也是这样先用上的样式对象，后面的样式对象、链式方法照这两条盖过它。
     ///

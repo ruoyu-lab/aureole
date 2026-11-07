@@ -89,6 +89,8 @@ struct State {
     revealed_paths: Vec<PathBuf>,
     notifications: Vec<ShownNotification>,
     app_name: Option<String>,
+    /// 放过几次提示音
+    beeps: usize,
     dialogs: Vec<PendingDialog>,
     alerts: Vec<(String, String)>,
     dark_mode: Option<bool>,
@@ -210,6 +212,7 @@ impl HeadlessBackend {
                 revealed_paths: Vec::new(),
                 notifications: Vec::new(),
                 app_name: None,
+                beeps: 0,
                 dialogs: Vec::new(),
                 alerts: Vec::new(),
                 dark_mode: Some(false),
@@ -284,6 +287,11 @@ impl HeadlessBackend {
     /// 发过的通知（标题、正文）
     pub fn notifications(&self) -> Vec<(String, String)> {
         self.lock().notifications.iter().map(|shown| (shown.request.title.clone(), shown.request.body.clone())).collect()
+    }
+
+    /// 放过几次提示音
+    pub fn beep_count(&self) -> usize {
+        self.lock().beeps
     }
 
     /// 发过的通知，带着动作按钮
@@ -843,6 +851,11 @@ impl NotificationService for HeadlessBackend {
 
     fn set_app_name(&self, name: &str) {
         self.lock().app_name = Some(name.to_owned());
+    }
+
+    fn beep(&self) -> Result<(), PlatformError> {
+        self.lock().beeps += 1;
+        Ok(())
     }
 }
 

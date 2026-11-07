@@ -4,6 +4,7 @@
 //! - [`Memo`]：由其他值算出来的缓存值，惰性计算，结果没变时不通知下游
 //! - [`Effect`]：读过的值变了就重新执行，界面上的属性绑定都是它
 //! - [`Scope`]：拥有期间创建的节点，释放时一起释放，组件卸载靠它避免泄漏
+//! - [`StoredValue`]：不需要响应的值（`Rc` 包着的服务、配置）换一个 `Copy` 的句柄，闭包直接捕获，读写不订阅也不通知
 //! - [`batch`]、[`untracked`]、[`on_cleanup`]：批量更新、不订阅地读取、随作用域释放的清理
 //! - [`provide_context`]、[`context`]：给作用域里的代码传"环境"（比如它属于哪个窗口）
 //!
@@ -42,11 +43,13 @@ mod memo;
 mod runtime;
 mod scope;
 mod signal;
+mod stored;
 
 pub use effect::{Effect, effect};
 pub use memo::{Memo, memo};
 pub use scope::Scope;
 pub use signal::{Signal, signal};
+pub use stored::{StoredValue, stored_value};
 
 use runtime::with_runtime;
 

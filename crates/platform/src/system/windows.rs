@@ -468,6 +468,14 @@ fn enqueue(queued: QueuedToast) -> Result<(), PlatformError> {
     queue.send(queued).map_err(|_| PlatformError::System("通知的线程已经结束".into()))
 }
 
+/// 系统的提示音（`MessageBeep(MB_OK)`：声音设置里"默认响声"那一个）
+pub fn beep() -> Result<(), PlatformError> {
+    use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MB_OK;
+    // SAFETY: MessageBeep 只把声音排进系统的队列，参数是常量，没有指针
+    if unsafe { MessageBeep(MB_OK) } != 0 { Ok(()) } else { Err(PlatformError::System("MessageBeep 失败".into())) }
+}
+
 /// 发通知（toast），在"通知"线程上发，调用方不等。没有应用标识（直接运行的可执行文件，比如 `cargo run`）时返回"需要打包"；
 /// 排进队列以后的失败在那个线程上记下通知的内容
 pub fn notify(title: &str, body: &str) -> Result<(), PlatformError> {

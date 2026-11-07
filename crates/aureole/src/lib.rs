@@ -108,7 +108,7 @@ pub use aureole_core::{
     ImageCacheStats, ImageFit, PlaybackHandle, ImageSource, ImageState, RgbaImage, image, image_cache_stats, set_image_cache_budget,
     Fill, Gradient, StopColor, ColorSpace, LineCap, LineJoin, VectorPath, VectorPathBuilder, Stroke,
     // 数据加载、按窗口大小切换、系统外观
-    Resource, debounced, resource, SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size, Appearance, Conventions,
+    Resource, debounced, resource, SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size, Appearance, Conventions, DisplayInfo,
     // 任务和定时器、时间线
     LocalTask, Sleep, Task, sleep, spawn, spawn_blocking, spawn_local, Timer, after, every,
     // 后台执行器：内置的线程池，或者应用换上的
@@ -129,11 +129,11 @@ pub use aureole_core::{
     Buttons, GestureInput, Ime, ImePurpose, ImeRequest, InputEvent, InputKind, Key, KeyInput, Modifiers, NamedKey, PhysicalKey, PointerId, PointerInput, PointerKind,
     WheelDelta, WheelInput,
     // 属性的值、响应式
-    IntoProp, Prop, Effect, Memo, Scope, Signal, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, untracked,
+    IntoProp, Prop, Effect, Memo, Scope, Signal, StoredValue, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, stored_value, untracked,
     // 颜色、滚动、虚拟列表、样式的值、画布
     Color, WideColor, ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit,
     IntoListSource, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list,
-    Align, Direction, Justify, Rect, Shadow, Shadows, Canvas, CanvasHits, CanvasTextStyle, Drawing, canvas, FrameStats, without_animation,
+    Align, Direction, Justify, Rect, Shadow, Shadows, Canvas, CanvasHits, CanvasTextMetrics, CanvasTextStyle, Drawing, canvas, FrameStats, without_animation,
     // 元素种类：自己定义带内容的元素（见 `kinds` 模块）
     ElementKind,
     // 动画的时钟（暂停、慢放、拖动时间）
@@ -159,7 +159,7 @@ pub use controls::{
 
 pub use runtime::{
     App, Capabilities, CloseRequest, ColorOutput, DisplayColor, FileDialog, FrameClockKind, GpuError, GpuPreference, GroupCacheStats, Notification, OpenRequest, OpenSource,
-    PlatformError, SingleInstance, TitleBar, Window, WindowHandle, WindowMaterial, capabilities, clipboard, current_window, display_color, group_cache_stats, notify,
+    PlatformError, SingleInstance, TitleBar, Window, WindowHandle, WindowMaterial, beep, capabilities, clipboard, current_window, display_color, displays, group_cache_stats, notify,
     open_path, open_url, quit, is_motion_reduced, reveal_path, set_group_cache_budget, system_accent_color, system_appearance,
 };
 // 菜单栏和托盘

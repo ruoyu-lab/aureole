@@ -128,7 +128,8 @@ impl Window {
         self
     }
 
-    /// 初始位置（窗口左上角在屏幕上的逻辑像素坐标）；不指定时由系统决定
+    /// 初始位置（整个窗口连同标题栏的左上角，在屏幕上的逻辑像素坐标）；不指定时由系统决定。
+    /// 和 [`WindowHandle::position`]、[`WindowHandle::set_position`] 是同一个点：存下的位置下次照样放回去
     pub fn position(mut self, x: impl Number, y: impl Number) -> Self {
         self.position = Some([x.to_f32(), y.to_f32()]);
         self

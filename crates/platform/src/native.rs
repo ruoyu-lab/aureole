@@ -663,6 +663,10 @@ impl NotificationService for NativeBackend {
     fn set_app_name(&self, name: &str) {
         system::imp::set_app_name(name);
     }
+
+    fn beep(&self) -> Result<(), PlatformError> {
+        system::imp::beep()
+    }
 }
 
 /// 没有菜单栏、托盘的平台上的回答

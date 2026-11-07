@@ -15,7 +15,7 @@ use platform::{LineEdgeKeys, ModifierKey, PlatformBackend, RedoKeys};
 use scene::Color;
 
 use aureole_core::host::SystemBackend;
-use aureole_core::{Appearance, Conventions, Date, FileDialogDone, FileDialogKind, FileDialogRequest, Modifiers, Time};
+use aureole_core::{Appearance, Conventions, Date, DisplayInfo, FileDialogDone, FileDialogKind, FileDialogRequest, Modifiers, Time};
 use winit::raw_window_handle::HasWindowHandle;
 
 /// 运行时用的平台后端：进程里唯一的本机后端。平台相关的事（帧时钟、系统设置、剪贴板、对话框、通知、菜单托盘……）都从它走
@@ -62,6 +62,30 @@ impl SystemBackend for PlatformSystem {
         // 在窗口里调用时是这个窗口的表单
         let parent = crate::window::current_window().and_then(crate::window::native);
         backend().dialog().file_dialog(dialog_options(request), parent.as_deref().map(|w| w as &dyn HasWindowHandle), done);
+    }
+
+    /// 用任意一个打开着的窗口问窗口库：每个显示器的物理坐标按它自己的缩放比例换成逻辑像素，
+    /// 和窗口的 `position()`（按窗口所在显示器的比例换算）在同一个显示器上对得上
+    fn displays(&self) -> Vec<DisplayInfo> {
+        let Some(window) = crate::window::front_window().and_then(crate::window::native) else { return Vec::new() };
+        let primary = window.primary_monitor();
+        let mut displays: Vec<DisplayInfo> = window
+            .available_monitors()
+            .map(|monitor| {
+                let scale = monitor.scale_factor();
+                let position = monitor.position().to_logical::<f32>(scale);
+                let size = monitor.size().to_logical::<f32>(scale);
+                DisplayInfo {
+                    name: monitor.name().unwrap_or_default(),
+                    position: [position.x, position.y],
+                    size: [size.width, size.height],
+                    scale_factor: scale as f32,
+                    primary: primary.as_ref() == Some(&monitor),
+                }
+            })
+            .collect();
+        displays.sort_by_key(|display| !display.primary);
+        displays
     }
 
     fn local_time(&self) -> Option<(Date, Time)> {
@@ -186,6 +210,15 @@ pub fn system_accent_color() -> Option<Color> {
     aureole_core::system_accent_color()
 }
 
+/// 接着的显示器，主显示器在最前面：名字、位置、大小（逻辑像素）、缩放比例。每次调用时问系统，不是响应式的；
+/// 还没有打开过窗口时是空的。窗口在某个显示器上时，它的 [`crate::WindowHandle::position`] 和这个显示器的位置是同一套坐标，
+/// 恢复上次的窗口位置前可以先看那个点还在不在某个显示器上（[`DisplayInfo::contains`]）。
+/// 测试工具里是一个 1440 × 900 的主显示器（`Harness::set_displays` 换）
+pub fn displays() -> Vec<DisplayInfo> {
+    install();
+    aureole_core::displays()
+}
+
 /// 用系统默认的应用打开网址，例如 `https://…`、`mailto:…`。返回是否交给了系统。
 /// 测试工具里不真的打开，记下来（`Harness::opened_urls`）
 pub fn open_url(url: &str) -> bool {
@@ -206,6 +239,13 @@ pub fn open_path(path: impl AsRef<Path>) -> bool {
 pub fn reveal_path(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
     backend().shell().reveal_path(path).map_err(|error| tracing::warn!(path = %path.display(), "没能在文件管理器里显示：{error}")).is_ok()
+}
+
+/// 放一下系统的提示音（用户在系统设置里选的那一个），比如按了做不了的键、输入不合法。返回是否放了。
+/// macOS 是 `NSBeep`，Windows 是 `MessageBeep`；Linux 的桌面没有统一的提示音，返回 `false`。
+/// 测试工具里不出声，记次数（`Harness::beep_count`）
+pub fn beep() -> bool {
+    platform::with_backend(|backend| backend.notification().beep()).map_err(|error| tracing::debug!("没有提示音：{error}")).is_ok()
 }
 
 /// 发系统通知，返回是否交给了系统。系统通知不可用时把不可用的原因和通知的内容记下来（`tracing` 的 info），返回 `false`：

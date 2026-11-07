@@ -267,6 +267,8 @@ pub struct UpdateContext {
     pub(crate) scale: f32,
     /// 要重做什么：至少重画
     pub(crate) dirty: Dirty,
+    /// 量文字（[`crate::Drawing::record_in`] 交给画笔）
+    pub(crate) text: Option<crate::canvas::TextMeasurer>,
 }
 
 impl UpdateContext {

@@ -584,6 +584,11 @@ impl Harness {
         true
     }
 
+    /// 换掉接着的显示器（默认是一个 1440 × 900、缩放比例 2 的主显示器）：测试恢复窗口位置这类按显示器决定的逻辑
+    pub fn set_displays(&self, displays: Vec<aureole_core::DisplayInfo>) {
+        HeadlessSystem::with(|s| *s.displays.lock().unwrap_or_else(|e| e.into_inner()) = displays);
+    }
+
     /// 换掉现在的本地日期和时间（默认固定为 2026-01-15 09:30，测试不随真实的时钟变）
     pub fn set_local_time(&self, date: aureole_core::Date, time: aureole_core::Time) {
         HeadlessSystem::with(|s| *s.local_time.lock().unwrap_or_else(|e| e.into_inner()) = (date, time));
@@ -597,6 +602,11 @@ impl Harness {
     /// 这个测试工具创建以来发过的通知（[`aureole_core`] 外面的 `aureole::notify`、`aureole::Notification`）：测试里不真的发
     pub fn notifications(&self) -> Vec<NotificationRequest> {
         HeadlessSystem::with(|s| s.backend.notification_requests())
+    }
+
+    /// 这个测试工具创建以来放过几次提示音（`aureole::beep`）：测试里不出声
+    pub fn beep_count(&self) -> usize {
+        HeadlessSystem::with(|s| s.backend.beep_count())
     }
 
     /// 模拟用户点了第 `index` 条通知本身（从 0 数）。回调投递回主线程，下一次 [`Self::frame`] 时调用处理器。
@@ -1364,6 +1374,8 @@ struct HeadlessSystem {
     local_time: std::sync::Mutex<(aureole_core::Date, aureole_core::Time)>,
     /// 核心的惯例：测试可以换（[`Harness::set_conventions`]），无头后端的那一份建好以后不能改
     conventions: std::sync::Mutex<aureole_core::Conventions>,
+    /// 接着的显示器（[`Harness::set_displays`]）
+    displays: std::sync::Mutex<Vec<aureole_core::DisplayInfo>>,
 }
 
 thread_local! {
@@ -1377,6 +1389,13 @@ impl HeadlessSystem {
             conventions: std::sync::Mutex::new(aureole_core::Conventions::MACOS),
             dialogs: std::sync::Mutex::new(Vec::new()),
             local_time: std::sync::Mutex::new((aureole_core::Date::new(2026, 1, 15), aureole_core::Time::new(9, 30))),
+            displays: std::sync::Mutex::new(vec![aureole_core::DisplayInfo {
+                name: "测试显示器".into(),
+                position: [0.0, 0.0],
+                size: [1440.0, 900.0],
+                scale_factor: 2.0,
+                primary: true,
+            }]),
         });
         // 应用直接用的剪贴板、通知走平台层的后端：同一个无头后端
         platform::set_thread_backend(Some(system.backend.clone()));
@@ -1430,5 +1449,9 @@ impl aureole_core::host::SystemBackend for HeadlessSystem {
 
     fn local_time(&self) -> Option<(aureole_core::Date, aureole_core::Time)> {
         Some(*self.local_time.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn displays(&self) -> Vec<aureole_core::DisplayInfo> {
+        self.displays.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }

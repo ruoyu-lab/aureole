@@ -545,6 +545,11 @@ pub trait NotificationService: Send + Sync {
 
     /// 通知里显示的应用名（Linux 用；macOS 读 Info.plist，Windows 按应用标识）
     fn set_app_name(&self, name: &str);
+
+    /// 放一下系统的提示音（用户在系统设置里选的那一个），比如按了做不了的键。没有这回事的平台返回"不支持"
+    fn beep(&self) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported("这个平台没有系统提示音".into()))
+    }
 }
 
 /// 菜单项的编号：调用方给，点击时原样送回

@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use reactive::Signal;
 use scene::{Angle, Color, Quad};
 
@@ -94,7 +95,7 @@ impl ElementKind for CanvasKind {
     }
 
     fn update(&mut self, cx: &mut UpdateContext) {
-        self.drawing.record(cx.size(), cx.scale_factor(), |canvas| (self.draw)(canvas));
+        self.drawing.record_in(cx, |canvas| (self.draw)(canvas));
         self.described = self.drawing.described_regions();
         if let Some(hits) = self.hits {
             self.drawing.report_hits(hits);
@@ -217,14 +218,6 @@ impl CanvasTextStyle {
         self
     }
 
-    pub(crate) fn size(&self) -> Option<f32> {
-        self.size
-    }
-
-    pub(crate) fn weight_value(&self) -> Option<f32> {
-        self.weight
-    }
-
     pub(crate) fn fill(&self) -> Option<&Fill> {
         self.color.as_ref()
     }
@@ -233,8 +226,15 @@ impl CanvasTextStyle {
         [self.align[0].unwrap_or(Align::Start), self.align[1].unwrap_or(Align::Baseline)]
     }
 
-    pub(crate) fn is_tabular(&self) -> bool {
-        self.tabular
+    /// 排版用的样式：没设的字号、字重用元素继承的 `base`；画布上的文字不画下划线、删除线
+    pub(crate) fn resolve(&self, base: &TextStyle) -> TextStyle {
+        let mut style = *base;
+        style.size = self.size.unwrap_or(base.size);
+        style.weight = self.weight.unwrap_or(base.weight);
+        style.tabular |= self.tabular;
+        style.underline = false;
+        style.strikethrough = false;
+        style
     }
 }
 
@@ -254,6 +254,24 @@ pub struct Canvas {
     rec: Recording,
     /// 逻辑像素 -> 物理像素：折线按物理像素列抽稀
     scale: f32,
+    /// 量文字（[`Canvas::text_metrics`]）：在元素树的文字系统里排一遍；没有时量不了
+    measure: Option<TextMeasurer>,
+    /// 元素继承的文字样式：量文字时和画的时候一样按它补上没设的字号、字重
+    style: TextStyle,
+}
+
+/// 量文字：按样式在元素树的文字系统里排一遍（画布在树外画，量的时候才借一下文字系统）
+pub(crate) type TextMeasurer = Rc<dyn Fn(&str, &TextStyle) -> CanvasTextMetrics>;
+
+/// 一段文字排出来的大小（[`Canvas::text_metrics`]），逻辑像素
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CanvasTextMetrics {
+    /// 宽
+    pub width: f32,
+    /// 高（一行的行高）
+    pub height: f32,
+    /// 基线到顶边的距离
+    pub baseline: f32,
 }
 
 /// 画好的一幅：[`Drawing::record`] 用画笔 [`Canvas`] 画，画出来的东西记下来；生成显示列表时 [`Drawing::paint`]
@@ -291,7 +309,18 @@ impl Drawing {
     /// 重新画：`size` 是画布大小（一般是元素的大小，[`crate::kinds::PaintContext::size`]），`scale` 是窗口缩放。
     /// 原来记下的换掉；路径图集里预留的块、排好的文字留着，下次放进显示列表时还能用上
     pub fn record(&mut self, size: [f32; 2], scale: f32, draw: impl FnOnce(&mut Canvas)) {
+        self.record_measured(size, scale, None, draw);
+    }
+
+    /// 在 [`ElementKind::update`] 里重新画：大小、窗口缩放取 `cx` 的，画的时候能量文字（[`Canvas::text_metrics`]）
+    pub fn record_in(&mut self, cx: &UpdateContext, draw: impl FnOnce(&mut Canvas)) {
+        self.record_measured(cx.size(), cx.scale_factor(), cx.text.clone(), draw);
+    }
+
+    fn record_measured(&mut self, size: [f32; 2], scale: f32, measure: Option<TextMeasurer>, draw: impl FnOnce(&mut Canvas)) {
         let mut canvas = Canvas::new(size, scale);
+        canvas.measure = measure;
+        canvas.style = self.style;
         draw(&mut canvas);
         self.recording = Some(canvas.finish());
     }
@@ -427,6 +456,8 @@ impl Canvas {
             stack: Vec::new(),
             rec: Recording { size, ..Default::default() },
             scale: scale.max(0.1),
+            measure: None,
+            style: TextStyle::default(),
         }
     }
 
@@ -437,6 +468,30 @@ impl Canvas {
     /// 画布（元素）的大小，逻辑像素
     pub fn size(&self) -> [f32; 2] {
         self.rec.size
+    }
+
+    /// 一段文字按 `style` 画出来有多宽、多高、基线在哪（和 [`Canvas::text`] 排得一样：没设的字号、字重用元素继承的）。
+    /// 用来接着上一段文字往后画、量出标签的宽度再画底色。
+    ///
+    /// [`canvas`] 里、自己定义的元素种类用 [`Drawing::record_in`] 画时量得出；用 [`Drawing::record`] 画（比如在 `paint` 里）时
+    /// 没有排版可用，是 `None`
+    ///
+    /// ```no_run
+    /// # use aureole::prelude::*;
+    /// canvas(|cx| {
+    ///     let style = CanvasTextStyle::new(12.0).align(Align::Start, Align::Start);
+    ///     let mut x = 8.0;
+    ///     for (label, value) in [("开", "3021.5"), ("高", "3058.0"), ("收", "3044.2")] {
+    ///         let piece = format!("{label} {value}");
+    ///         cx.text(x, 8.0, piece.as_str(), &style);
+    ///         x += cx.text_metrics(&piece, &style).map_or(0.0, |m| m.width) + 12.0;
+    ///     }
+    /// })
+    /// .size(320, 40);
+    /// ```
+    pub fn text_metrics(&self, text: &str, style: &CanvasTextStyle) -> Option<CanvasTextMetrics> {
+        let measure = self.measure.as_ref()?;
+        Some(measure(text, &style.resolve(&self.style)))
     }
 
     /// 一个物理像素是多少逻辑像素：画清晰的细线用

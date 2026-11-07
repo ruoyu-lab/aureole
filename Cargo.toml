@@ -66,7 +66,8 @@ pastey = "0.2"
 serde_json = "1"
 # 安装包的压缩：纯 Rust 的后端，不用 C 编译器（`aureole-installer`）
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# 运行中发现的情况（功能失败、用法和环境问题、生命周期提示）：框架只记录，不替应用装订阅者。winit 已经用了同一版
+# 运行中发现的情况（功能失败、用法和环境问题、生命周期提示）：框架只记录；调试构建里应用没装订阅者时，
+# 运行时把框架的警告和错误打到标准错误。winit 已经用了同一版
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false }
 pollster = "1"

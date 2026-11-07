@@ -347,6 +347,15 @@ pub(crate) mod macos {
         tracing::error!(reason = reason.as_deref().unwrap_or("用户没有允许"), "没有发通知的权限（系统设置 → 通知）");
     }
 
+    /// 系统的提示音（`NSBeep`：系统设置 → 声音里选的那个）。要在主线程上
+    pub fn beep() -> Result<(), PlatformError> {
+        if MainThreadMarker::new().is_none() {
+            return Err(PlatformError::System("提示音要在主线程上放".into()));
+        }
+        objc2_app_kit::NSBeep();
+        Ok(())
+    }
+
     /// 发系统通知（第一次会请求权限）。UNUserNotificationCenter 要求应用打包成 .app：
     /// 没有包标识符时直接调用会抛异常，所以这时什么都不做，返回"需要打包"
     pub fn notify(title: &str, body: &str) -> Result<(), PlatformError> {
@@ -586,6 +595,10 @@ pub(crate) mod fallback {
 
     pub fn notify(_title: &str, _body: &str) -> Result<(), crate::PlatformError> {
         Err(crate::PlatformError::Unsupported("这个平台没有系统通知".into()))
+    }
+
+    pub fn beep() -> Result<(), crate::PlatformError> {
+        Err(crate::PlatformError::Unsupported("这个平台没有系统提示音".into()))
     }
 
     pub fn show_notification(_request: crate::NotificationRequest, _on_response: crate::OnNotificationResponse) -> Result<(), crate::PlatformError> {

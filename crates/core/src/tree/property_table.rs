@@ -301,8 +301,8 @@ props! {
         reset: [],
     }
 
-    /// 四边相同的内边距，可做动画（[`Property::Padding`]）。单边的 [`Element::padding_x`]、[`Element::padding_y`]
-    /// 不管先后都盖过它
+    /// 四边相同的内边距，可做动画（[`Property::Padding`]）。[`Element::padding_x`]、[`Element::padding_y`]、
+    /// 单边的 [`Element::padding_left`] 这些不管先后都盖过它
     padding: f32 = 0.0 => {
         order: 260, storage: Layout, dirty: LAYOUT, applies: ANY, inherited: false, anim: [Number, 1e-2],
         method: exact, style: true, late: false, bind: typed,
@@ -341,6 +341,42 @@ props! {
             s.padding.bottom = LengthPercentage::length(v);
         }),
         read: |t, id| style(t, id).map(|s| number_of(s.padding.top)),
+        reset: [],
+    }
+
+    /// 左内边距，盖过 `padding`、`padding_x` 的左边
+    padding_left: f32 = 0.0 => {
+        order: 292, storage: Layout, dirty: LAYOUT, applies: ANY, inherited: false, anim: [],
+        method: exact, style: true, late: false, bind: typed,
+        write: |t, id, v| t.update_style(id, |s| s.padding.left = LengthPercentage::length(v)),
+        read: |t, id| style(t, id).map(|s| number_of(s.padding.left)),
+        reset: [],
+    }
+
+    /// 右内边距，盖过 `padding`、`padding_x` 的右边
+    padding_right: f32 = 0.0 => {
+        order: 294, storage: Layout, dirty: LAYOUT, applies: ANY, inherited: false, anim: [],
+        method: exact, style: true, late: false, bind: typed,
+        write: |t, id, v| t.update_style(id, |s| s.padding.right = LengthPercentage::length(v)),
+        read: |t, id| style(t, id).map(|s| number_of(s.padding.right)),
+        reset: [],
+    }
+
+    /// 上内边距，盖过 `padding`、`padding_y` 的上边
+    padding_top: f32 = 0.0 => {
+        order: 296, storage: Layout, dirty: LAYOUT, applies: ANY, inherited: false, anim: [],
+        method: exact, style: true, late: false, bind: typed,
+        write: |t, id, v| t.update_style(id, |s| s.padding.top = LengthPercentage::length(v)),
+        read: |t, id| style(t, id).map(|s| number_of(s.padding.top)),
+        reset: [],
+    }
+
+    /// 下内边距，盖过 `padding`、`padding_y` 的下边
+    padding_bottom: f32 = 0.0 => {
+        order: 298, storage: Layout, dirty: LAYOUT, applies: ANY, inherited: false, anim: [],
+        method: exact, style: true, late: false, bind: typed,
+        write: |t, id, v| t.update_style(id, |s| s.padding.bottom = LengthPercentage::length(v)),
+        read: |t, id| style(t, id).map(|s| number_of(s.padding.bottom)),
         reset: [],
     }
 

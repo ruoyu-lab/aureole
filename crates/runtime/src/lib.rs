@@ -18,6 +18,7 @@
 
 mod app;
 pub mod clipboard;
+mod debug_log;
 mod display_color;
 mod external_drag;
 #[cfg(feature = "menus")]
@@ -49,5 +50,5 @@ pub use plugin::{FrameInfo, PlatformEvent, PlatformEventKind, Plugin};
 pub use render_thread::{GroupCacheStats, group_cache_stats, set_group_cache_budget};
 pub use render::{GpuError, GpuPreference};
 pub use platform::{Capabilities, FrameClockKind, PlatformError, TitleBar, WindowMaterial};
-pub use system::{capabilities, notify, open_path, open_url, is_motion_reduced, reveal_path, system_accent_color, system_appearance};
+pub use system::{beep, capabilities, displays, notify, open_path, open_url, is_motion_reduced, reveal_path, system_accent_color, system_appearance};
 pub use window::{CloseRequest, Window, WindowHandle, current_window, quit};

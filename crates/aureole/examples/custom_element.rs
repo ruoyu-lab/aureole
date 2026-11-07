@@ -57,7 +57,7 @@ impl ElementKind for Gauge {
         self.shown = self.value.get().clamp(0.0, 1.0);
         let value = self.shown;
         let [w, h] = cx.size();
-        self.drawing.record(cx.size(), cx.scale_factor(), |c| {
+        self.drawing.record_in(cx, |c| {
             let (center, r) = ([w * 0.5, h * 0.56], (w * 0.5).min(h * 0.62) - 10.0);
             let arc = |to: f32| -> Vec<[f32; 2]> {
                 let steps = 48;

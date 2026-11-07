@@ -15,8 +15,11 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::fmt;
 use std::marker::PhantomData;
 use std::mem;
+#[cfg(debug_assertions)]
+use std::panic::Location;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 
@@ -64,6 +67,77 @@ pub(crate) type Value = Rc<dyn Any>;
 pub(crate) type HandleMarker<T> = PhantomData<(fn() -> T, *const ())>;
 
 const MISMATCH: &str = "响应式节点的值类型不匹配";
+
+/// 句柄是在哪创建的（只有调试构建记）：读不出值时报出来，好找到是哪一个信号
+#[derive(Clone, Copy)]
+pub(crate) struct DefinedAt {
+    #[cfg(debug_assertions)]
+    location: &'static Location<'static>,
+}
+
+impl DefinedAt {
+    #[track_caller]
+    pub(crate) fn here() -> Self {
+        Self {
+            #[cfg(debug_assertions)]
+            location: Location::caller(),
+        }
+    }
+}
+
+impl fmt::Display for DefinedAt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[cfg(debug_assertions)]
+        return write!(f, "（在 {} 创建）", self.location);
+        #[cfg(not(debug_assertions))]
+        Ok(())
+    }
+}
+
+/// 节点读不出值的原因
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unreadable {
+    /// 节点释放了
+    Disposed,
+    /// 在信号自己的 `update` 闭包里又读它
+    InOwnUpdate,
+    /// 派生值还没算出值（在它自己的计算里读了它）
+    NotComputed,
+    NoValue,
+}
+
+/// 把节点的值交给 `f`；读不出来时 panic，位置是读的那一行，说明原因和句柄是在哪创建的
+#[track_caller]
+pub(crate) fn read_value<T: 'static, R>(value: Result<Value, Unreadable>, defined: DefinedAt, f: impl FnOnce(&T) -> R) -> R {
+    match value {
+        Ok(value) => f(value.downcast_ref::<T>().expect(MISMATCH)),
+        Err(reason) => unreadable(reason, defined),
+    }
+}
+
+/// 读得出值时交给 `f`，节点释放了是 `None`；别的原因照样 panic（那是用错了，不是作用域的先后）
+#[track_caller]
+pub(crate) fn try_read_value<T: 'static, R>(value: Result<Value, Unreadable>, defined: DefinedAt, f: impl FnOnce(&T) -> R) -> Option<R> {
+    match value {
+        Err(Unreadable::Disposed) => None,
+        value => Some(read_value(value, defined, f)),
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn unreadable(reason: Unreadable, defined: DefinedAt) -> ! {
+    match reason {
+        Unreadable::Disposed => panic!(
+            "读了已释放的信号或派生值{defined}。它归创建时的作用域，作用域释放了它也就没了：常见于在浮层、对话框、列表项、\
+             child_when 的内容里创建，却在外面用。要活得久的状态在外面创建；确实可能已经释放时用 try_get、try_with"
+        ),
+        Unreadable::InOwnUpdate => panic!("在信号自己的 update 闭包里又读写它{defined}：闭包的参数就是它现在的值"),
+        Unreadable::NotComputed => panic!("派生值还没有算出值{defined}（在它自己的计算里读了它？）"),
+        Unreadable::NoValue => panic!("这个响应式节点没有值{defined}"),
+    }
+}
 
 /// `flush` 一次最多跑几轮。一轮是"上一轮的副作用写信号、排进来的副作用"，正常的连锁几轮就停；
 /// 两个副作用互相写对方读的信号时会一直转下去，到这里停下、报一次错误
@@ -247,23 +321,15 @@ impl Runtime {
         self.nodes.borrow().len()
     }
 
-    /// 读取节点的值；节点已释放时 panic。
-    ///
-    /// 调用户闭包时不拿着运行时的任何借用：手里是值的一份 `Rc`。闭包里写同一个信号时信号换一份新的值，
+    /// 节点现在的值（一份 `Rc`）。句柄拿着它在运行时的借用之外调用户的闭包：闭包里写同一个信号时信号换一份新的值，
     /// 这次读看到的还是读开始时的值
-    pub(crate) fn read<T: 'static, R>(&self, id: NodeId, f: impl FnOnce(&T) -> R) -> R {
-        let value = self.snapshot(id);
-        f(value.downcast_ref::<T>().expect(MISMATCH))
-    }
-
-    /// 节点现在的值（一份 `Rc`）
-    fn snapshot(&self, id: NodeId) -> Value {
+    pub(crate) fn snapshot(&self, id: NodeId) -> Result<Value, Unreadable> {
         match self.nodes.borrow().get(id) {
-            Some(Node { value: Some(value), .. }) => value.clone(),
-            Some(Node { kind: Kind::Signal, .. }) => panic!("在信号自己的 update 闭包里又读写它：闭包的参数就是它现在的值"),
-            Some(Node { kind: Kind::Memo, .. }) => panic!("派生值还没有算出值（在它自己的计算里读了它？）"),
-            Some(_) => panic!("这个响应式节点没有值"),
-            None => panic!("使用了已释放的信号或派生值"),
+            Some(Node { value: Some(value), .. }) => Ok(value.clone()),
+            Some(Node { kind: Kind::Signal, .. }) => Err(Unreadable::InOwnUpdate),
+            Some(Node { kind: Kind::Memo, .. }) => Err(Unreadable::NotComputed),
+            Some(_) => Err(Unreadable::NoValue),
+            None => Err(Unreadable::Disposed),
         }
     }
 

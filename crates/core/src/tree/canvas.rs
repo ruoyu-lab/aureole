@@ -135,12 +135,7 @@ impl Drawing {
                 }
                 Item::Text(t) => {
                     let label = &t.text_style;
-                    let mut text_style = *style;
-                    text_style.size = label.size().unwrap_or(style.size);
-                    text_style.weight = label.weight_value().unwrap_or(style.weight);
-                    text_style.tabular |= label.is_tabular();
-                    text_style.underline = false;
-                    text_style.strikethrough = false;
+                    let text_style = label.resolve(style);
                     let key = TextKey {
                         text: t.text.clone(),
                         numbers: [text_style.size.to_bits(), text_style.weight.to_bits(), text_style.letter_spacing.to_bits()],

@@ -114,6 +114,30 @@ impl Conventions {
     }
 }
 
+/// 一个显示器（[`crate::displays`]）。位置和大小是逻辑像素：显示器的物理像素按它自己的缩放比例换算，
+/// 窗口在这个显示器上时和 `WindowHandle::position`、`set_position` 是同一套坐标（macOS 上就是系统的点坐标）
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisplayInfo {
+    /// 系统给的名字；没有时是空的
+    pub name: String,
+    /// 左上角在桌面上的位置
+    pub position: [f32; 2],
+    /// 宽和高
+    pub size: [f32; 2],
+    /// 一个逻辑像素是几个物理像素
+    pub scale_factor: f32,
+    /// 是不是主显示器（macOS 上带菜单栏的那个）
+    pub primary: bool,
+}
+
+impl DisplayInfo {
+    /// 桌面上的点 `[x, y]`（逻辑像素）在不在这个显示器上
+    pub fn contains(&self, point: [f32; 2]) -> bool {
+        let [x, y] = point;
+        x >= self.position[0] && y >= self.position[1] && x < self.position[0] + self.size[0] && y < self.position[1] + self.size[1]
+    }
+}
+
 /// 系统那一侧的实现：系统设置、剪贴板、用默认应用打开网址、平台的惯例。
 ///
 /// 运行时启动时装上平台的实现（[`set_system_backend`]），整个进程一份；测试工具在自己的线程上换成进程内的替身
@@ -146,6 +170,10 @@ pub trait SystemBackend: Send + Sync {
     /// 本地的日期和时间；问不到时是 `None`，这时按世界协调时算
     fn local_time(&self) -> Option<(Date, Time)> {
         None
+    }
+    /// 接着的显示器，主显示器在最前面；问不到时是空的
+    fn displays(&self) -> Vec<DisplayInfo> {
+        Vec::new()
     }
 }
 
@@ -292,6 +320,13 @@ pub fn local_date_time() -> (Date, Time) {
 /// 今天（本地日期），见 [`local_date_time`]
 pub fn today() -> Date {
     local_date_time().0
+}
+
+/// 接着的显示器，主显示器在最前面。每次调用时问系统（不是响应式的）；还没有打开过窗口时是空的。
+/// 找窗口在哪个显示器上：`displays().into_iter().find(|d| d.contains(window.position()))`。
+/// 测试工具里是一个 1440 × 900 的主显示器，`Harness::set_displays` 换
+pub fn displays() -> Vec<DisplayInfo> {
+    with_backend(|b| b.displays()).unwrap_or_default()
 }
 
 /// 用系统默认的应用打开网址，例如 `https://…`、`mailto:…`。返回是否交给了系统

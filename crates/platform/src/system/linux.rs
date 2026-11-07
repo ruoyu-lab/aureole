@@ -344,6 +344,11 @@ fn enqueue(queued: QueuedNotification) -> Result<(), PlatformError> {
     queue.send(queued).map_err(|_| PlatformError::System("通知的线程已经结束".into()))
 }
 
+/// Linux 的桌面没有统一的系统提示音接口（X11 的响铃、各桌面的声音服务各管各的）
+pub fn beep() -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported("Linux 的桌面没有统一的系统提示音".into()))
+}
+
 /// 发通知（`org.freedesktop.Notifications.Notify`），在"通知"线程上发，调用方不等。
 /// 已经确定没有会话总线时返回"不支持"；排进队列以后的失败在那个线程上记下通知的内容
 pub fn notify(title: &str, body: &str) -> Result<(), PlatformError> {

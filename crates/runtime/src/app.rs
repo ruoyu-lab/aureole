@@ -290,6 +290,8 @@ impl App {
         crate::performance::startup_mark("进入 App::run");
         // 插件最先装：它们可能换执行器、改主窗口、挂钩子
         self = self.build_plugins();
+        // 应用和插件都没装订阅者：调试构建里框架的警告打到终端
+        crate::debug_log::install();
         if let Some(install) = self.spawner.take() {
             install();
         }
@@ -869,6 +871,11 @@ impl Runner {
         let attributes = crate::title_bar::window_attributes(attributes, title_bar, backdrop);
         let start = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("创建窗口失败"));
+        // macOS 上窗口库建窗口时把这个位置当成内容区的左上角，`position()`、`set_position` 用的却是整个窗口的：
+        // 显示之前按整个窗口再放一次，存下的位置下次照样放回去，不会每次往上漂一个标题栏
+        if let Some([x, y]) = position {
+            window.set_outer_position(LogicalPosition::new(x, y));
+        }
         #[cfg(feature = "menus")]
         if decorations && !hidden_title_bar {
             menu::attach_window(&window);
