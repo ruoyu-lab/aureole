@@ -27,7 +27,7 @@ use scene::Color;
 
 use crate::input::Modifiers;
 
-/// 系统外观（深色 / 浅色）。框架自带的样子只有浅色一套，不跟着它变；应用想跟着系统换颜色时在绑定里读 [`crate::system_appearance`]
+/// 外观（深色 / 浅色）：系统的是 [`crate::system_appearance`]，应用此刻生效的是 [`crate::appearance`]（框架自带的样子按它画）
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Appearance {
@@ -43,6 +43,20 @@ impl Appearance {
     pub fn is_dark(self) -> bool {
         self == Appearance::Dark
     }
+}
+
+/// 应用用哪种外观（[`set_appearance_mode`]）：跟着系统（默认），或者固定成浅色、深色。
+/// 框架自带的样子（窗口底色、默认的文字颜色、基础控件、窗口的标题栏和材质）都按生效的外观（[`appearance`]）画
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AppearanceMode {
+    /// 跟着系统：系统切换深浅色时跟着换
+    #[default]
+    System,
+    /// 一直是浅色
+    Light,
+    /// 一直是深色
+    Dark,
 }
 
 /// 平台的惯例：同一个操作在各平台上习惯用的键、滚轮一行滚多远。输入、编辑、滚动按它走，不再各自按编译目标判断。
@@ -206,6 +220,7 @@ fn with_backend<R>(f: impl FnOnce(&dyn SystemBackend) -> R) -> Option<R> {
 
 thread_local! {
     static THEME: Cell<Option<Signal<Appearance>>> = const { Cell::new(None) };
+    static MODE: Cell<Option<Signal<AppearanceMode>>> = const { Cell::new(None) };
     static REDUCE_MOTION: Cell<Option<Signal<bool>>> = const { Cell::new(None) };
     static ACCENT: Cell<Option<Signal<Option<Color>>>> = const { Cell::new(None) };
 }
@@ -253,6 +268,27 @@ fn accent_signal() -> Signal<Option<Color>> {
 /// Linux 读 XDG 门户的 `color-scheme`，后台线程听它的变化（GNOME、KDE 都支持）
 pub fn system_appearance() -> Appearance {
     theme_signal().get()
+}
+
+/// 应用此刻生效的外观，响应式：设成浅色、深色（[`set_appearance_mode`]）时是它，跟着系统时是 [`system_appearance`]。
+/// 框架自带的样子按它画；自己的颜色要跟着深浅变时也在绑定里读它（或者读 [`crate::defaults::palette`]）
+pub fn appearance() -> Appearance {
+    match appearance_mode() {
+        AppearanceMode::Light => Appearance::Light,
+        AppearanceMode::Dark => Appearance::Dark,
+        AppearanceMode::System => system_appearance(),
+    }
+}
+
+/// 应用的外观设置，响应式（默认跟着系统）
+pub fn appearance_mode() -> AppearanceMode {
+    setting(&MODE, AppearanceMode::default).get()
+}
+
+/// 换应用的外观设置：跟着系统，或者固定成浅色、深色。全应用一个，所有窗口立即跟着换（绑定、控件、窗口的标题栏和材质）；
+/// 在任何地方都能调用，`App::appearance_mode` 是在启动时设
+pub fn set_appearance_mode(mode: AppearanceMode) {
+    report(&MODE, mode);
 }
 
 /// 系统打开了"减少动态效果"（辅助功能设置），响应式。应用自己的动画按它决定要不要用移动和缩放；

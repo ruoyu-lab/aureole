@@ -1,12 +1,10 @@
 //! 基础控件默认的样子：每个部位一个样式对象，每个线程只建一次，所有控件共用（克隆只加引用计数）。
-//! 颜色、白底细线框都来自核心的 [`aureole_core::defaults`]（输入框是核心的元素，它的样子也在那里）；没有动画，状态一变立即换。
+//! 颜色、表面加细线框都来自核心的 [`aureole_core::defaults`] 的调色板，跟着应用的外观（浅色、深色）变（输入框是核心的元素，它的样子也在那里）；
+//! 没有动画，状态一变立即换。
 
 use std::rc::Rc;
 
-use aureole_core::defaults::{
-    ACCENT, ACCENT_HOVER, ACCENT_PRESSED, ACCENT_SOFT, BORDER, BORDER_HOVER, CONTROL_HEIGHT, CONTROL_RADIUS, DISABLED_OPACITY, FILL, FILL_PRESSED,
-    INDICATOR, LINE, MUTED, OVERLAY_SHADOW, PLACEHOLDER, SURFACE, TEXT, TRACK, field_style,
-};
+use aureole_core::defaults::{CONTROL_HEIGHT, CONTROL_RADIUS, DISABLED_OPACITY, OVERLAY_SHADOW, Palette, field_style, palette};
 use aureole_core::{Align, Color, Direction, Justify, Shadow, Style, max_content, pct};
 
 /// 按钮、输入框、下拉框、数字输入的高度
@@ -80,6 +78,11 @@ pub(crate) fn look() -> Rc<Look> {
     LOOK.with(Rc::clone)
 }
 
+/// 调色板里的一种颜色，跟着应用的外观变（[`aureole_core::appearance`]）
+fn tone(pick: fn(&Palette) -> Color) -> impl Fn() -> Color + 'static {
+    move || pick(palette())
+}
+
 /// 禁用时变淡
 fn dim() -> Style {
     Style::new().disabled(|s| s.opacity(DISABLED_OPACITY))
@@ -95,16 +98,16 @@ impl Look {
             .shrink(0)
             .align(Align::Center)
             .justify(Justify::Center)
-            .background(SURFACE)
-            .border(1, INDICATOR)
+            .background(tone(|p| p.surface))
+            .border(1, tone(|p| p.indicator))
             .color(Color::WHITE)
-            .hovered(|s| s.border_color(MUTED))
-            .pressed(|s| s.background(FILL_PRESSED))
+            .hovered(|s| s.border_color(tone(|p| p.muted)))
+            .pressed(|s| s.background(tone(|p| p.fill_pressed)))
             .checked(|s| {
-                s.background(ACCENT)
-                    .border_color(ACCENT)
-                    .hovered(|s| s.background(ACCENT_HOVER).border_color(ACCENT_HOVER))
-                    .pressed(|s| s.background(ACCENT_PRESSED).border_color(ACCENT_PRESSED))
+                s.background(tone(|p| p.accent))
+                    .border_color(tone(|p| p.accent))
+                    .hovered(|s| s.background(tone(|p| p.accent_hover)).border_color(tone(|p| p.accent_hover)))
+                    .pressed(|s| s.background(tone(|p| p.accent_pressed)).border_color(tone(|p| p.accent_pressed)))
             });
         Self {
             button: Style::new()
@@ -115,14 +118,14 @@ impl Look {
                 .align(Align::Center)
                 .justify(Justify::Center)
                 .width(max_content())
-                .background(SURFACE)
-                .border(1, BORDER)
-                .color(TEXT)
+                .background(tone(|p| p.surface))
+                .border(1, tone(|p| p.border))
+                .color(tone(|p| p.text))
                 .font_size(14)
-                .hovered(|s| s.background(FILL).border_color(BORDER_HOVER))
-                .pressed(|s| s.background(FILL_PRESSED).border_color(BORDER_HOVER))
+                .hovered(|s| s.background(tone(|p| p.fill)).border_color(tone(|p| p.border_hover)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)).border_color(tone(|p| p.border_hover)))
                 .disabled(|s| s.opacity(DISABLED_OPACITY)),
-            label: Style::new().color(TEXT).font_size(14),
+            label: Style::new().color(tone(|p| p.text)).font_size(14),
             toggle_root: dim().gap(8).align(Align::Center).width(max_content()).max_width(pct(100)).radius(RADIUS).font_size(14),
             checkbox_box: indicator.clone().radius(3),
             mark: Style::new().opacity(0.0).checked(|s| s.opacity(1.0)),
@@ -142,13 +145,13 @@ impl Look {
                 .shrink(0)
                 .padding(2)
                 .radius(9)
-                .background(TRACK)
-                .hovered(|s| s.background(Color::hex(0xc7cdd5)))
-                .pressed(|s| s.background(Color::hex(0xbac1ca)))
+                .background(tone(|p| p.track))
+                .hovered(|s| s.background(tone(|p| p.track_hover)))
+                .pressed(|s| s.background(tone(|p| p.track_pressed)))
                 .checked(|s| {
-                    s.background(ACCENT)
-                        .hovered(|s| s.background(ACCENT_HOVER))
-                        .pressed(|s| s.background(ACCENT_PRESSED))
+                    s.background(tone(|p| p.accent))
+                        .hovered(|s| s.background(tone(|p| p.accent_hover)))
+                        .pressed(|s| s.background(tone(|p| p.accent_pressed)))
                 }),
             switch_thumb: Style::new().size(14, 14).radius(7).background(Color::WHITE).checked(|s| s.translation_x(14)),
             select: field
@@ -159,15 +162,15 @@ impl Look {
                 .align(Align::Center)
                 .width(max_content())
                 .min_width(120)
-                .open(|s| s.border_color(ACCENT)),
-            select_arrow: Style::new().size(12, 12).shrink(0).color(MUTED),
+                .open(|s| s.border_color(tone(|p| p.accent))),
+            select_arrow: Style::new().size(12, 12).shrink(0).color(tone(|p| p.muted)),
             select_list: Style::new()
                 .padding(4)
                 .radius(6)
-                .background(SURFACE)
-                .border(1, LINE)
+                .background(tone(|p| p.surface))
+                .border(1, tone(|p| p.line))
                 .shadow(OVERLAY_SHADOW)
-                .color(TEXT)
+                .color(tone(|p| p.text))
                 .font_size(14)
                 .max_height(300),
             select_option: Style::new()
@@ -176,24 +179,24 @@ impl Look {
                 .gap(8)
                 .radius(RADIUS)
                 .align(Align::Center)
-                .focused(|s| s.background(ACCENT_SOFT))
-                .pressed(|s| s.background(Color::hex(0xd8e4fb)))
-                .selected(|s| s.color(ACCENT)),
+                .focused(|s| s.background(tone(|p| p.accent_soft)))
+                .pressed(|s| s.background(tone(|p| p.accent_soft_pressed)))
+                .selected(|s| s.color(tone(|p| p.accent))),
             select_mark: Style::new().opacity(0.0).selected(|s| s.opacity(1.0)),
             slider: dim().width(200).height(16).radius(8),
-            slider_track: Style::new().height(4).radius(2).background(TRACK),
+            slider_track: Style::new().height(4).radius(2).background(tone(|p| p.track)),
             slider_vertical: dim().width(16).height(200).radius(8),
-            slider_track_vertical: Style::new().width(4).radius(2).background(TRACK),
-            slider_fill: Style::new().radius(2).background(ACCENT),
+            slider_track_vertical: Style::new().width(4).radius(2).background(tone(|p| p.track)),
+            slider_fill: Style::new().radius(2).background(tone(|p| p.accent)),
             slider_thumb: Style::new()
                 .size(16, 16)
                 .radius(8)
-                .background(SURFACE)
-                .border(1, INDICATOR)
-                .hovered(|s| s.border_color(ACCENT))
-                .pressed(|s| s.border_color(ACCENT).background(FILL)),
-            progress: Style::new().width(200).height(6).radius(3).background(TRACK),
-            progress_fill: Style::new().radius(3).background(ACCENT),
+                .background(tone(|p| p.surface))
+                .border(1, tone(|p| p.indicator))
+                .hovered(|s| s.border_color(tone(|p| p.accent)))
+                .pressed(|s| s.border_color(tone(|p| p.accent)).background(tone(|p| p.fill))),
+            progress: Style::new().width(200).height(6).radius(3).background(tone(|p| p.track)),
+            progress_fill: Style::new().radius(3).background(tone(|p| p.accent)),
             // 描边向内画、不占布局：留出一像素，按钮的底色不盖住描边（number 也一样）
             picker: field
                 .clone()
@@ -201,8 +204,8 @@ impl Look {
                 .padding(1)
                 .align(Align::Center)
                 .width(max_content())
-                .focused(|s| s.border_color(ACCENT))
-                .open(|s| s.border_color(ACCENT)),
+                .focused(|s| s.border_color(tone(|p| p.accent)))
+                .open(|s| s.border_color(tone(|p| p.accent))),
             picker_field: Style::new()
                 .width(104)
                 .height(HEIGHT - 2.0)
@@ -219,10 +222,10 @@ impl Look {
                 .radius(RADIUS - 1.0)
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .color(MUTED)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED))
-                .disabled(|s| s.color(PLACEHOLDER)),
+                .color(tone(|p| p.muted))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
+                .disabled(|s| s.color(tone(|p| p.placeholder))),
             // 高度按内容：和更高的东西并排放时不被拉高，四边的留白才一样
             calendar: Style::new()
                 .padding(8)
@@ -230,9 +233,9 @@ impl Look {
                 .radius(6)
                 .width(max_content())
                 .height(max_content())
-                .background(SURFACE)
-                .border(1, LINE)
-                .color(TEXT)
+                .background(tone(|p| p.surface))
+                .border(1, tone(|p| p.line))
+                .color(tone(|p| p.text))
                 .font_size(14),
             calendar_header: Style::new().gap(2).height(28).align(Align::Center),
             calendar_nav: Style::new()
@@ -241,11 +244,11 @@ impl Look {
                 .radius(RADIUS)
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .color(MUTED)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED))
+                .color(tone(|p| p.muted))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
                 .disabled(|s| s.opacity(DISABLED_OPACITY)),
-            calendar_weekday: Style::new().size(32, 24).shrink(0).align(Align::Center).justify(Justify::Center).color(MUTED).font_size(12),
+            calendar_weekday: Style::new().size(32, 24).shrink(0).align(Align::Center).justify(Justify::Center).color(tone(|p| p.muted)).font_size(12),
             calendar_day: Style::new()
                 .size(32, 28)
                 .shrink(0)
@@ -253,17 +256,17 @@ impl Look {
                 .align(Align::Center)
                 .justify(Justify::Center)
                 .border(1, Color::TRANSPARENT)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED))
-                .checked(|s| s.border_color(ACCENT))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
+                .checked(|s| s.border_color(tone(|p| p.accent)))
                 .selected(|s| {
-                    s.background(ACCENT)
-                        .border_color(ACCENT)
+                    s.background(tone(|p| p.accent))
+                        .border_color(tone(|p| p.accent))
                         .color(Color::WHITE)
-                        .hovered(|s| s.background(ACCENT_HOVER).border_color(ACCENT_HOVER))
-                        .pressed(|s| s.background(ACCENT_PRESSED).border_color(ACCENT_PRESSED))
+                        .hovered(|s| s.background(tone(|p| p.accent_hover)).border_color(tone(|p| p.accent_hover)))
+                        .pressed(|s| s.background(tone(|p| p.accent_pressed)).border_color(tone(|p| p.accent_pressed)))
                 })
-                .disabled(|s| s.color(PLACEHOLDER).background(Color::TRANSPARENT).border_color(Color::TRANSPARENT)),
+                .disabled(|s| s.color(tone(|p| p.placeholder)).background(Color::TRANSPARENT).border_color(Color::TRANSPARENT)),
             calendar_footer: Style::new().gap(4).justify(Justify::End).align(Align::Center),
             calendar_action: Style::new()
                 .height(26)
@@ -271,9 +274,9 @@ impl Look {
                 .font_size(13)
                 .background(Color::TRANSPARENT)
                 .border_color(Color::TRANSPARENT)
-                .color(ACCENT)
-                .hovered(|s| s.background(ACCENT_SOFT).border_color(Color::TRANSPARENT))
-                .pressed(|s| s.background(Color::hex(0xd8e4fb)).border_color(Color::TRANSPARENT)),
+                .color(tone(|p| p.accent))
+                .hovered(|s| s.background(tone(|p| p.accent_soft)).border_color(Color::TRANSPARENT))
+                .pressed(|s| s.background(tone(|p| p.accent_soft_pressed)).border_color(Color::TRANSPARENT)),
             time_column: Style::new().width(62).height(224),
             time_item: Style::new()
                 .height(28)
@@ -281,17 +284,17 @@ impl Look {
                 .radius(RADIUS)
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
                 .selected(|s| {
-                    s.background(ACCENT)
+                    s.background(tone(|p| p.accent))
                         .color(Color::WHITE)
-                        .hovered(|s| s.background(ACCENT_HOVER))
-                        .pressed(|s| s.background(ACCENT_PRESSED))
+                        .hovered(|s| s.background(tone(|p| p.accent_hover)))
+                        .pressed(|s| s.background(tone(|p| p.accent_pressed)))
                 })
-                .disabled(|s| s.color(PLACEHOLDER).background(Color::TRANSPARENT)),
+                .disabled(|s| s.color(tone(|p| p.placeholder)).background(Color::TRANSPARENT)),
             // 高度按内容：和更高的东西并排放时不被拉高
-            color_panel: Style::new().padding(8).gap(8).radius(6).width(264).height(max_content()).background(SURFACE).border(1, LINE).color(TEXT).font_size(14),
+            color_panel: Style::new().padding(8).gap(8).radius(6).width(264).height(max_content()).background(tone(|p| p.surface)).border(1, tone(|p| p.line)).color(tone(|p| p.text)).font_size(14),
             color_area: Style::new().grow(1).min_width(0).height(150).radius(RADIUS),
             color_hue: Style::new().width(pct(100)).height(16).align(Align::Center),
             color_alpha: Style::new().width(16).shrink(0).align(Align::Center),
@@ -307,26 +310,26 @@ impl Look {
                 .padding(2)
                 .radius(5)
                 .border(1, Color::TRANSPARENT)
-                .hovered(|s| s.border_color(BORDER_HOVER))
-                .selected(|s| s.border_color(ACCENT)),
-            file: dim().gap(8).align(Align::Center).width(300).max_width(pct(100)).padding(2).radius(RADIUS).border(1, Color::TRANSPARENT).font_size(14).open(|s| s.border_color(ACCENT)),
+                .hovered(|s| s.border_color(tone(|p| p.border_hover)))
+                .selected(|s| s.border_color(tone(|p| p.accent))),
+            file: dim().gap(8).align(Align::Center).width(300).max_width(pct(100)).padding(2).radius(RADIUS).border(1, Color::TRANSPARENT).font_size(14).open(|s| s.border_color(tone(|p| p.accent))),
             file_button: Style::new().shrink(0),
-            file_label: Style::new().color(PLACEHOLDER).selected(|s| s.color(TEXT)),
+            file_label: Style::new().color(tone(|p| p.placeholder)).selected(|s| s.color(tone(|p| p.text))),
             file_clear: Style::new()
                 .size(22, 22)
                 .shrink(0)
                 .radius(RADIUS)
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .color(MUTED)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED)),
+                .color(tone(|p| p.muted))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed))),
             number: field
                 .height(HEIGHT)
                 .padding(1)
                 .align(Align::Center)
                 .width(max_content())
-                .focused(|s| s.border_color(ACCENT)),
+                .focused(|s| s.border_color(tone(|p| p.accent))),
             number_field: Style::new()
                 .width(56)
                 .height(HEIGHT - 2.0)
@@ -343,10 +346,10 @@ impl Look {
                 .radius(RADIUS - 1.0)
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .color(TEXT)
-                .hovered(|s| s.background(FILL))
-                .pressed(|s| s.background(FILL_PRESSED))
-                .disabled(|s| s.color(PLACEHOLDER)),
+                .color(tone(|p| p.text))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
+                .disabled(|s| s.color(tone(|p| p.placeholder))),
         }
     }
 }

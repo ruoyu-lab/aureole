@@ -4,6 +4,7 @@
 
 ### 新增
 
+- **深色**：应用的外观 `AppearanceMode`（`System` 跟着系统，默认；`Light`；`Dark`），`App::appearance_mode(..)`、`set_appearance_mode(..)`、`appearance_mode()`，生效的外观 `appearance()`（响应式）。框架自带的样子有浅色、深色两套调色板（`defaults::Palette::LIGHT`、`Palette::DARK`），`defaults::palette()` 按生效的外观取，自己的颜色要跟着深浅变时在闭包里读它。
 - 拖放时跟着指针走的样子能限制位移（见教程第 11 章）：`drag_preview_axis(Direction::Row)` 只横着走、`Direction::Column` 只竖着走，`drag_preview_contained(true)` 碰到父元素的边就停住。横着的标签条、看板的列排序时不再上下飘，也不会被裁剪的父元素切掉一半。影子和抬起都生效，找放置目标照样看指针。
 - 单边的内边距：`padding_left`、`padding_right`、`padding_top`、`padding_bottom`，不管调用的先后都盖过 `padding` 和 `padding_x` / `padding_y`。定时器 `after`、`every` 进了前导模块。
 - 画布量文字：`Canvas::text_metrics(内容, &样式)` 返回 `CanvasTextMetrics`（宽、高、基线），和 `Canvas::text` 排得一样；自己的元素种类在 `update` 里用新的 `Drawing::record_in(cx, ..)` 画也量得出。
@@ -15,11 +16,13 @@
 
 ### 改变
 
+- **框架自带的样子默认跟着系统的深浅色**：窗口底色、没设颜色的文字、选区、滚动条、基础控件、输入框、提示、窗口的标题栏和材质在深色系统上换成深色那套（只换中性色，强调色不变）；以前一直是浅色。自己写死了浅色背景、又没设文字颜色的地方会变成浅底浅字：颜色写成读 `palette()` 的闭包，或者 `App::appearance_mode(AppearanceMode::Light)` 固定成浅色。`aureole::defaults` 的颜色常量（`BACKGROUND`、`SURFACE`、`TEXT`、`ACCENT`……）换成了调色板的字段：`Palette::LIGHT.text`、`palette().text`。
 - 样式对象合起来时，后写的状态连同上面的悬停、焦点、按下一起盖过前面的：只改了"勾选"的颜色，勾上以后悬停、按下不再变回默认的；只改了平时的底色，悬停、按下时也是它（默认配着默认底色的悬停色一起让掉）。勾选、选中、展开、禁用这些别的样子照旧留着。以前靠默认悬停效果的，现在要在样式对象里自己写悬停。
 - 调试构建默认显示框架的警告：应用没装 `tracing` 的订阅者时，`App::run` 装一个最小的，把框架自己的警告和错误（滚动视口高度是 0、属性设错了元素、快捷键写错、GPU 出错……）打到标准错误。自己装了订阅者的、发布构建不受影响；要自己装的话放在 `App::run` 之前。
 
 ### 修正
 
+- Windows 上应用是深色时，窗口材质（Mica）仍然按浅色画：现在在窗口上写深色标记（设材质之前），深浅变了再设一次材质类型。
 - macOS 上 `Window::position(x, y)` 放的是内容区的左上角，`WindowHandle::position()` 读的却是整个窗口的，差一个标题栏的高度：存下位置、下次启动再放回去时，窗口每次往上漂一截。现在三者都是整个窗口连同标题栏的左上角。
 - macOS 上双击拖动区域、`WindowHandle::set_maximized` 缩放窗口时，动画的约 0.35 秒里内容停着不动，结束后才一下跳到新的大小。现在缩放动画的每一步都按新的大小出一帧，`is_maximized` 在缩放中保持设的值。
 

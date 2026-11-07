@@ -407,6 +407,16 @@ impl WindowService for NativeBackend {
         TitleBarAction::Zoom
     }
 
+    fn set_window_dark(&self, window: &dyn HasWindowHandle, dark: bool, backdrop: WindowMaterial) -> Result<(), PlatformError> {
+        #[cfg(target_os = "windows")]
+        return crate::title_bar::windows::set_dark(window, dark, backdrop);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (window, dark, backdrop);
+            Ok(())
+        }
+    }
+
     fn run_outside_event_callback(&self, f: Box<dyn FnOnce()>) {
         #[cfg(target_os = "macos")]
         imp::run_outside_event_callback(f);

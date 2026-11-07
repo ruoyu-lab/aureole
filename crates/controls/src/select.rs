@@ -339,7 +339,7 @@ impl<V: Clone + PartialEq + 'static> Select<V> {
             .grow(1)
             .min_width(0)
             .child_when(move || state.selected_index().is_some(), move || text(move || state.shown_text()).max_lines(1))
-            .child_when(move || state.selected_index().is_none(), move || text(move || state.shown_text()).max_lines(1).color(aureole_core::defaults::PLACEHOLDER));
+            .child_when(move || state.selected_index().is_none(), move || text(move || state.shown_text()).max_lines(1).color(|| aureole_core::defaults::palette().placeholder));
         let arrow = part(path(chevron()).stroke(Stroke::new(2.0).round()), &l.select_arrow, &arrow, &base);
         let mut el = press.attach(row()).accessibility_role(Role::ComboBox).field_handle(field);
         el = disabled.apply(el);

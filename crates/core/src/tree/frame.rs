@@ -204,10 +204,14 @@ impl Tree {
         timelines
     }
 
-    /// 内容自己的时钟：加载了新字体时已经排好的文字都重新排（缺字回退的结果可能变了），
-    /// 元素种类的时钟（有焦点的输入框、字符网格的插入点闪烁）
+    /// 内容自己的时钟：加载了新字体时已经排好的文字都重新排（缺字回退的结果可能变了）；应用的外观换了时换一套默认的颜色，
+    /// 继承的文字颜色、选区重新算，文字重新排（链接、行内代码的颜色在排版里）；元素种类的时钟（有焦点的输入框、字符网格的插入点闪烁）
     fn tick_content(&mut self, now: f64) {
         if self.text.sync_fonts() {
+            self.invalidate_text();
+        }
+        if self.paint.set_colors(reactive::untracked(crate::defaults::palette)) {
+            self.layout.restyle();
             self.invalidate_text();
         }
         self.tick_kinds(now);

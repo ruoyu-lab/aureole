@@ -88,7 +88,10 @@ pub use scene::ColorSpace;
 pub use vector::{LineCap, LineJoin, VectorPath, VectorPathBuilder, Stroke};
 pub use resource::{Resource, debounced, resource};
 pub use responsive::{SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size};
-pub use system::{Appearance, Conventions, DisplayInfo, clipboard, conventions, displays, local_date_time, open_url, today, is_motion_reduced, system_accent_color, system_appearance};
+pub use system::{
+    Appearance, AppearanceMode, Conventions, DisplayInfo, appearance, appearance_mode, clipboard, conventions, displays, local_date_time, open_url, set_appearance_mode,
+    today, is_motion_reduced, system_accent_color, system_appearance,
+};
 pub use task::{
     BlockingJob, LocalTask, MainThreadSender, PoolSpawner, SendFuture, Sleep, Spawner, Task, main_thread_sender,
     set_spawner, sleep, spawn, spawn_blocking, spawn_local, spawner,
@@ -193,7 +196,7 @@ pub mod prelude {
     pub use crate::{ms, secs};
     // 按窗口大小切换：尺寸档、断点
     pub use crate::{SizeClass, is_window_at_least, responsive, window_size_class};
-    pub use crate::{Appearance, Resource, is_motion_reduced, resource, spawn, spawn_blocking, spawn_local, system_appearance};
+    pub use crate::{Appearance, AppearanceMode, Resource, appearance, is_motion_reduced, resource, spawn, spawn_blocking, spawn_local, system_appearance};
     // 定时器，登记收成守卫（`every(..).guard()`）
     pub use crate::{Cancel, after, every};
     // 无障碍：角色、实时区域

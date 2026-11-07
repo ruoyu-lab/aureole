@@ -24,7 +24,7 @@
 //! - **元素和链式 API**：[`Element`] 是唯一的元素类型，[`rect`]、[`row`]、[`column()`]、[`text()`]、[`path`]、
 //!   [`image()`] 创建它，再链式设置样式和事件。自己的部件就是返回 `impl View` 的普通函数
 //! - **基础控件**（[`controls`]）：日期、时间、颜色、文件选择，按钮、输入框（单行、多行、密码）、复选框、单选组、开关、下拉选择、滑块、进度条、
-//!   数字输入、标签。行为完整（键盘、焦点、无障碍、拖动、弹出列表），默认的样子朴素、只有浅色，没有内置动画
+//!   数字输入、标签。行为完整（键盘、焦点、无障碍、拖动、弹出列表），默认的样子朴素（浅色、深色两套，跟着应用的外观），没有内置动画
 //! - **样式对象**：[`Style`] 是一组可以共用、合起来、带状态（悬停、按下、焦点、禁用，控件部位的勾选、选中、打开）的属性，
 //!   [`Element::style`] 用到元素上，控件的每个部位也收样式对象
 //! - **信号**：属性可以是静态值，也可以是读取信号的闭包（[`IntoProp`]），信号变了只更新这一个属性。
@@ -108,7 +108,7 @@ pub use aureole_core::{
     ImageCacheStats, ImageFit, PlaybackHandle, ImageSource, ImageState, RgbaImage, image, image_cache_stats, set_image_cache_budget,
     Fill, Gradient, StopColor, ColorSpace, LineCap, LineJoin, VectorPath, VectorPathBuilder, Stroke,
     // 数据加载、按窗口大小切换、系统外观
-    Resource, debounced, resource, SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size, Appearance, Conventions, DisplayInfo,
+    Resource, debounced, resource, SizeClass, TitleBarInfo, is_window_at_least, responsive, set_size_class_widths, title_bar_info, window_size_class, window_size, Appearance, AppearanceMode, appearance_mode, set_appearance_mode, Conventions, DisplayInfo,
     // 任务和定时器、时间线
     LocalTask, Sleep, Task, sleep, spawn, spawn_blocking, spawn_local, Timer, after, every,
     // 后台执行器：内置的线程池，或者应用换上的
@@ -160,7 +160,7 @@ pub use controls::{
 pub use runtime::{
     App, Capabilities, CloseRequest, ColorOutput, DisplayColor, FileDialog, FrameClockKind, GpuError, GpuPreference, GroupCacheStats, Notification, OpenRequest, OpenSource,
     PlatformError, SingleInstance, TitleBar, Window, WindowHandle, WindowMaterial, beep, capabilities, clipboard, current_window, display_color, displays, group_cache_stats, notify,
-    open_path, open_url, quit, is_motion_reduced, reveal_path, set_group_cache_budget, system_accent_color, system_appearance,
+    open_path, open_url, quit, is_motion_reduced, reveal_path, set_group_cache_budget, system_accent_color, system_appearance, appearance,
 };
 // 菜单栏和托盘
 #[cfg(feature = "menus")]
@@ -226,7 +226,7 @@ pub mod prelude {
     // 应用和窗口
     pub use runtime::{App, Window, WindowHandle, current_window};
     // 系统设置：先装上平台的实现再读（同门面上的同名函数）
-    pub use runtime::{is_motion_reduced, system_appearance};
+    pub use runtime::{appearance, is_motion_reduced, system_appearance};
     // 选 GPU（`App::gpu`）
     pub use runtime::GpuPreference;
 }

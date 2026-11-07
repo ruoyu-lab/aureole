@@ -165,7 +165,7 @@ impl Window {
         self
     }
 
-    /// 窗口的背景色。不设置时是默认的浅灰底色；有窗口材质（[`Window::backdrop`]）时不设置是透明的，设了就是盖在材质上的一层，可以带透明度
+    /// 窗口的背景色。不设置时是调色板的窗口底色（跟着应用的外观）；有窗口材质（[`Window::backdrop`]）时不设置是透明的，设了就是盖在材质上的一层，可以带透明度
     pub fn background(mut self, color: Color) -> Self {
         self.background = Some(color);
         self

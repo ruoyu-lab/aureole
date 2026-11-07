@@ -67,7 +67,7 @@ impl PaintState {
             spans: Spans::default(),
             rebuilt: false,
             touched: Vec::new(),
-            colors: DefaultColors::new(),
+            colors: DefaultColors::new(reactive::untracked(crate::defaults::palette)),
         }
     }
 
@@ -218,6 +218,17 @@ impl PaintState {
     /// 元素没有指定时用的颜色
     pub(super) fn colors(&self) -> &DefaultColors {
         &self.colors
+    }
+
+    /// 换成这一套调色板的默认颜色，返回变了没有
+    pub(super) fn set_colors(&mut self, palette: &crate::defaults::Palette) -> bool {
+        let colors = DefaultColors::new(palette);
+        if colors == self.colors {
+            return false;
+        }
+        self.colors = colors;
+        self.dirty = true;
+        true
     }
 
     /// 登记一个自定义着色器，返回给 `Paint::shader` 用的编号（同一份源码只登记一次）

@@ -44,11 +44,12 @@ pub(crate) fn info(metrics: TitleBarMetrics, window_width: f32) -> TitleBarInfo 
     TitleBarInfo { height: metrics.height, controls, inset_left, inset_right }
 }
 
-/// 窗口的清屏颜色：有材质时没设背景色就是透明的（设了就是盖在材质上的一层，可以带透明度）；不透明时没设是默认的底色
+/// 窗口的清屏颜色：有材质时没设背景色就是透明的（设了就是盖在材质上的一层，可以带透明度）；不透明时没设是调色板的窗口底色
+/// （跟着应用的外观）
 pub(crate) fn clear_color(background: Option<scene::Color>, backdrop: WindowMaterial) -> scene::Color {
     match background {
         Some(color) => color,
-        None if backdrop.is_opaque() => aureole_core::defaults::BACKGROUND,
+        None if backdrop.is_opaque() => aureole_core::defaults::palette().background,
         None => scene::Color::TRANSPARENT,
     }
 }

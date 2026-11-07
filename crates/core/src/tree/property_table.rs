@@ -1112,8 +1112,9 @@ props! {
     }
 
     /// 文字颜色，也是路径的填充或描边色，可以继承，可做动画（[`Property::Color`]）。
-    /// 也可以是渐变：铺满元素自己的框，文字和路径露出框里对应位置的颜色；子孙继承时各自铺满自己的框
-    color: Fill = Fill::Color(crate::defaults::TEXT) => {
+    /// 也可以是渐变：铺满元素自己的框，文字和路径露出框里对应位置的颜色；子孙继承时各自铺满自己的框。
+    /// 都没设时是调色板的正文颜色，跟着应用的外观（[`crate::appearance`]）
+    color: Fill = Fill::Color(crate::defaults::Palette::LIGHT.text) => {
         order: 1020, storage: Text, dirty: PAINT, applies: ANY, inherited: true, anim: [Fill, 1e-3],
         method: into, style: true, late: false, bind: typed,
         write: |t, id, v| t.set_property(id, PropId::COLOR, PropertyValue::from(v)),
@@ -1149,8 +1150,8 @@ props! {
         reset: [|t, id| t.set_text_override(id, |o| o.align = None)],
     }
 
-    /// 选区的颜色（可选中的文字和输入框），可以继承；默认是半透明的蓝色
-    selection_color: Color = crate::defaults::SELECTION => {
+    /// 选区的颜色（可选中的文字和输入框），可以继承；默认是半透明的强调色（跟着应用的外观）
+    selection_color: Color = crate::defaults::Palette::LIGHT.selection => {
         order: 1060, storage: Text, dirty: PAINT, applies: ANY, inherited: true, anim: [],
         method: exact, style: true, late: false, bind: typed,
         write: |t, id, v| t.set_text_override(id, |o| o.selection = Some(v)),
@@ -1403,8 +1404,8 @@ props! {
         reset: [],
     }
 
-    /// 滚动条的颜色（默认是半透明的灰）。只对滚动视口有效
-    scrollbar_color: Color = crate::defaults::SCROLLBAR => {
+    /// 滚动条的颜色（默认是半透明的灰，深色外观里是半透明的白）。只对滚动视口有效
+    scrollbar_color: Color = crate::defaults::Palette::LIGHT.scrollbar => {
         order: 1310, storage: Scroll, dirty: PAINT, applies: SCROLL, inherited: false, anim: [],
         method: exact, style: false, late: true, bind: typed,
         write: |t, id, v| t.set_scrollbar_color(id, Some(v)),

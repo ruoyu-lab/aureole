@@ -158,16 +158,23 @@ fn detect_accent() -> Option<Color> {
     backend().appearance().accent_color().map(|[r, g, b]| Color::rgb(r, g, b))
 }
 
-/// 窗口报告的外观
-pub(crate) fn appearance_from_winit(theme: winit::window::Theme) -> Appearance {
-    match theme {
-        winit::window::Theme::Light => Appearance::Light,
-        winit::window::Theme::Dark => Appearance::Dark,
+/// 窗口库报告了外观（启动时、变化时）：以平台读到的系统设置为准。应用固定了深浅时窗口库报的是窗口自己的外观，
+/// 不是系统的；平台读不到时（没有桌面门户）才用报告的
+pub(crate) fn reported_appearance(theme: winit::window::Theme) -> Appearance {
+    match backend().appearance().is_dark_mode() {
+        Some(true) => Appearance::Dark,
+        Some(false) => Appearance::Light,
+        None if theme == winit::window::Theme::Dark => Appearance::Dark,
+        None => Appearance::Light,
     }
 }
 
 /// 重新问系统"减少动态效果"和强调色：窗口获得焦点、外观变化时调用（几次系统调用，没变时什么都不做）
 pub(crate) fn refresh_settings() {
+    // 应用固定了深浅时窗口库不再报告系统外观的变化：平台读得到就在这里补上
+    if let Some(dark) = backend().appearance().is_dark_mode() {
+        aureole_core::host::set_system_appearance(if dark { Appearance::Dark } else { Appearance::Light });
+    }
     aureole_core::host::set_motion_reduced(backend().appearance().is_motion_reduced());
     aureole_core::host::set_system_accent_color(detect_accent());
 }
@@ -186,6 +193,13 @@ pub(crate) fn settings_changed() {
 pub fn system_appearance() -> Appearance {
     install();
     aureole_core::system_appearance()
+}
+
+/// 应用此刻生效的外观，响应式：固定成浅色、深色（[`aureole_core::set_appearance_mode`]）时是它，跟着系统时是 [`system_appearance`]。
+/// 框架自带的样子按它画；自己的颜色要跟着深浅变时在绑定里读它，或者读 `aureole::defaults::palette()`
+pub fn appearance() -> Appearance {
+    install();
+    aureole_core::appearance()
 }
 
 /// 系统打开了"减少动态效果"（辅助功能设置），响应式。应用自己的动画按它决定要不要用移动和缩放；

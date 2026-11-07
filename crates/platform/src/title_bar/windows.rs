@@ -12,6 +12,7 @@
 //! 拖动窗口、双击缩放不经过这里：运行时调用窗口库的 `drag_window`（发 `WM_NCLBUTTONDOWN`、`HTCAPTION`，系统的移动循环，带贴靠）。
 //!
 //! **材质**：`DWMWA_SYSTEMBACKDROP_TYPE`（Windows 11 22H2 起），把窗口框架扩到整个内容区（`DwmExtendFrameIntoClientArea`）才透得出来。
+//! 材质默认按浅色画：深色要先在窗口上写 `DWMWA_USE_IMMERSIVE_DARK_MODE`（`set_dark`），改了深浅再设一次材质类型。
 //! 窗口的交换链要能带透明：HWND 上的交换链只能不透明，所以有材质的窗口的表面建在 DirectComposition 的视觉对象上（[`composition_target`]），
 //! 没有材质的窗口不碰这条路。
 
@@ -24,7 +25,7 @@ use windows::Win32::Graphics::DirectComposition::{DCompositionCreateDevice2, IDC
 use windows::core::Interface;
 use windows_sys::core::{PCWSTR, w};
 use windows_sys::Win32::Foundation::{ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_SYSTEMBACKDROP_TYPE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
 use windows_sys::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
@@ -295,6 +296,28 @@ pub(crate) fn set_backdrop(window: &dyn HasWindowHandle, backdrop: WindowMateria
     };
     if status < 0 {
         return Err(PlatformError::System(format!("DwmSetWindowAttribute 失败：{status:#x}").into()));
+    }
+    Ok(())
+}
+
+/// 窗口的外框用深色还是浅色：写 `DWMWA_USE_IMMERSIVE_DARK_MODE`（标题栏、边框，和材质的底色）。材质默认按浅色画，
+/// 这个标记要在设材质类型之前写；窗口已经有材质时，改了深浅要再设一次材质类型，颜色才换
+pub(crate) fn set_dark(window: &dyn HasWindowHandle, dark: bool, backdrop: WindowMaterial) -> Result<(), PlatformError> {
+    let hwnd = hwnd_of(window)?;
+    let value = i32::from(dark);
+    // SAFETY: `hwnd` 是活着的窗口；属性的值是 4 字节的布尔，在栈上
+    let status = unsafe { DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, std::ptr::from_ref(&value).cast(), size_of::<i32>() as u32) };
+    if status < 0 {
+        return Err(PlatformError::System(format!("设不上深色的窗口外框：{status:#x}").into()));
+    }
+    if !backdrop.is_opaque() && supports_backdrop() {
+        let backdrop_type = backdrop.windows_backdrop();
+        // SAFETY: 同上，属性的值是 4 字节的枚举
+        let status =
+            unsafe { DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE as u32, std::ptr::from_ref(&backdrop_type).cast(), size_of::<i32>() as u32) };
+        if status < 0 {
+            return Err(PlatformError::System(format!("换了深浅以后重设材质失败：{status:#x}").into()));
+        }
     }
     Ok(())
 }

@@ -620,7 +620,7 @@ impl Harness {
         HeadlessSystem::with(|s| s.backend.respond_to_notification(index, NotificationResponse::Action(action)))
     }
 
-    /// 离屏截图：把此刻的显示列表和合成层画成像素，底色和窗口一样是默认的窗口底色。
+    /// 离屏截图：把此刻的显示列表和合成层画成像素，底色和窗口一样是调色板的窗口底色（跟着应用的外观）。
     /// 大小是虚拟窗口乘上 [`Self::set_scale_factor`] 的缩放（物理像素）。要 GPU；第一次调用时创建，之后共用。
     ///
     /// 先 [`Self::frame`]（有图片时 [`Self::wait_images`]）；合成层按渲染线程此刻的状态画，动画中途也能截。
@@ -635,7 +635,7 @@ impl Harness {
     /// shot.save_png(std::env::temp_dir().join("red.png")).unwrap();
     /// ```
     pub fn screenshot(&self) -> Screenshot {
-        self.screenshot_with(defaults::BACKGROUND)
+        self.screenshot_with(defaults::palette().background)
     }
 
     /// 离屏截图，底色用 `background`（比如纯黑，方便检查像素），见 [`Self::screenshot`]
@@ -651,7 +651,7 @@ impl Harness {
     /// 显示器此刻的余量当作 `headroom`（SDR 白的倍数）：比它亮的颜色、HDR 图片按它压缩。
     /// 像素是线性的（sRGB 原色，分量可以小于 0、大于 1），其余同 [`Self::screenshot`]
     pub fn extended_screenshot(&self, headroom: f32) -> ExtendedScreenshot {
-        let background = defaults::BACKGROUND;
+        let background = defaults::palette().background;
         let (size, scale) = (self.probe.viewport(), self.probe.scale());
         let [width, height] = size.map(|v| ((v * scale).round() as u32).max(1));
         let viewport = Viewport { width, height, scale_factor: scale };

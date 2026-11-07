@@ -407,6 +407,14 @@ pub trait WindowService: Send + Sync {
         f();
     }
 
+    /// 窗口的外框（标题栏、边框、窗口材质的底色）用深色还是浅色，跟着应用的外观。`backdrop` 是窗口此刻的材质。
+    /// Windows 的材质默认按浅色画：在窗口上写深色的标记（要在设材质类型之前），已经有材质时再设一次材质类型颜色才换。
+    /// macOS、Linux 由窗口库的主题管，默认什么都不做
+    fn set_window_dark(&self, window: &dyn HasWindowHandle, dark: bool, backdrop: WindowMaterial) -> Result<(), PlatformError> {
+        let _ = (window, dark, backdrop);
+        Ok(())
+    }
+
     /// 窗口背后的材质。不支持时返回"不支持"，窗口照常不透明
     fn set_window_backdrop(&self, window: &dyn HasWindowHandle, backdrop: WindowMaterial) -> Result<(), PlatformError> {
         let _ = (window, backdrop);

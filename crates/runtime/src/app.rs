@@ -20,7 +20,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::window::{CursorIcon, Fullscreen, WindowId, WindowLevel};
 
 use aureole_core::host::{self, DragOutRequest, FrameReport, HostWindow, Recorder, RenderFrame, WindowHost, WindowTree};
-use aureole_core::{Cursor, ImePurpose, ImeRequest, IntoProp, Number, Prop, TitleBarInfo, View};
+use aureole_core::{Appearance, AppearanceMode, Cursor, ImePurpose, ImeRequest, IntoProp, Number, Prop, TitleBarInfo, View};
 
 use crate::display_color::{DisplayColor, OutputState};
 #[cfg(feature = "menus")]
@@ -186,9 +186,16 @@ impl App {
         self
     }
 
-    /// 主窗口的背景色。不设置时是默认的浅灰底色
+    /// 主窗口的背景色。不设置时是调色板的窗口底色（跟着应用的外观）
     pub fn background(mut self, color: Color) -> Self {
         self.main = self.main.background(color);
+        self
+    }
+
+    /// 应用的外观：跟着系统（默认），或者固定成浅色、深色，同 [`aureole_core::set_appearance_mode`]（运行中也能换）。
+    /// 框架自带的样子（窗口底色、默认的文字颜色、基础控件、窗口的标题栏和材质）按它画
+    pub fn appearance_mode(self, mode: AppearanceMode) -> Self {
+        aureole_core::set_appearance_mode(mode);
         self
     }
 
@@ -478,6 +485,20 @@ impl WinitWindow {
         }
     }
 
+    /// 应用的外观（`mode` 是设置，`appearance` 是生效的）：窗口库的主题管标题栏（跟着系统时交给系统），
+    /// 平台层管 Windows 的外框和材质的深浅；没设背景色的不透明窗口换清屏的颜色
+    fn apply_appearance(&self, mode: AppearanceMode, appearance: Appearance) {
+        self.window.set_theme(winit_theme(mode));
+        let backdrop = self.backdrop.get();
+        if let Err(error) = crate::system::backend().window().set_window_dark(&*self.window, appearance.is_dark(), backdrop) {
+            tracing::debug!("设不上窗口外框的深浅：{error}");
+        }
+        if self.background.is_none() && backdrop.is_opaque() {
+            let background = crate::title_bar::clear_color(None, backdrop);
+            let _ = self.sender.send(RenderMsg::Backdrop { transparent: false, background });
+        }
+    }
+
     /// 密码框有焦点、窗口在前面时打开系统的安全输入，否则关上（只有 macOS 有，别的平台什么都不做）
     fn update_secure_input(&self) {
         let wanted = self.focused.get() && self.ime.get().is_some_and(|r| r.purpose == ImePurpose::Password);
@@ -490,6 +511,15 @@ impl WinitWindow {
 /// 开不开输入法：有元素要文字输入、不是密码
 fn ime_allowed(request: Option<ImeRequest>) -> bool {
     request.is_some_and(|r| r.purpose != ImePurpose::Password)
+}
+
+/// 外观设置换成窗口库的主题：跟着系统时不指定，交给系统
+fn winit_theme(mode: AppearanceMode) -> Option<winit::window::Theme> {
+    match mode {
+        AppearanceMode::Light => Some(winit::window::Theme::Light),
+        AppearanceMode::Dark => Some(winit::window::Theme::Dark),
+        _ => None,
+    }
 }
 
 /// 用途换成窗口库的（窗口库没有数字这一种，按普通的）
@@ -624,7 +654,7 @@ impl ApplicationHandler<UserEvent> for Runner {
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(theme) = event_loop.system_theme() {
-            aureole_core::host::set_system_appearance(crate::system::appearance_from_winit(theme));
+            aureole_core::host::set_system_appearance(crate::system::reported_appearance(theme));
         }
         #[cfg(feature = "menus")]
         if let Some((menu, tray, app_name)) = self.pending_menu.take()
@@ -839,6 +869,7 @@ impl Runner {
             .with_resizable(resizable)
             .with_decorations(decorations)
             .with_window_level(if always_on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal })
+            .with_theme(winit_theme(reactive::untracked(aureole_core::appearance_mode)))
             // 无障碍适配器要在窗口第一次显示之前建好
             .with_visible(false);
         // 打包时嵌进可执行文件的图标（`cargo bundle`，资源编号 1）：标题栏、任务栏显示它。没有这个资源时用系统默认的
@@ -882,6 +913,11 @@ impl Runner {
         }
         if hidden_title_bar {
             attach_title_bar(handle, &window, title_bar_options);
+        }
+        // 外框的深浅要在设材质之前写上（Windows 的材质默认按浅色画）
+        let dark = reactive::untracked(aureole_core::appearance).is_dark();
+        if let Err(error) = crate::system::backend().window().set_window_dark(&*window, dark, WindowMaterial::Opaque) {
+            tracing::debug!("设不上窗口外框的深浅：{error}");
         }
         // 材质视图要在表面的图层之前放好（在它下面）
         let mut backdrop = backdrop;
@@ -1015,6 +1051,18 @@ impl Runner {
         };
         let translate = Rc::new(RefCell::new(TranslateState::new(window.scale_factor())));
         let host = Rc::new(WindowHost::new(tree, host_window));
+        // 应用的外观换了：窗口的外框（标题栏、材质）和没设背景色时的底色跟着换（元素树里的颜色由树自己换）
+        {
+            let host = Rc::downgrade(&host);
+            scope.run(|| {
+                Effect::new(move || {
+                    let (mode, appearance) = (aureole_core::appearance_mode(), aureole_core::appearance());
+                    if let Some(host) = host.upgrade() {
+                        host.window().apply_appearance(mode, appearance);
+                    }
+                })
+            });
+        }
         if let Some(path) = self.record.take() {
             let size = [viewport.width as f32 / viewport.scale_factor, viewport.height as f32 / viewport.scale_factor];
             match Recorder::create(&path, size, viewport.scale_factor, Some(std::env::consts::OS)) {
@@ -1197,7 +1245,7 @@ impl OpenWindow {
             }
             // 系统外观是全应用的：哪个窗口报告都一样
             WindowEvent::ThemeChanged(theme) => {
-                aureole_core::host::set_system_appearance(crate::system::appearance_from_winit(theme));
+                aureole_core::host::set_system_appearance(crate::system::reported_appearance(theme));
                 crate::system::refresh_settings();
             }
             // 窗口被完全挡住时系统会把帧时钟降到约 1Hz；告诉渲染线程这不是主线程卡住

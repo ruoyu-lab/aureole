@@ -188,12 +188,11 @@ struct TextTheme {
 }
 
 impl DefaultColors {
-    fn new() -> Self {
-        use crate::defaults as d;
-        let [normal, hover, pressed] = d::LINK;
+    fn new(p: &crate::defaults::Palette) -> Self {
+        let [normal, hover, pressed] = p.link();
         let links = LinkColors { normal, hover, pressed };
-        let rich = TextTheme { inactive: d::SELECTION_INACTIVE, links, code: d::CODE, background: d::BACKGROUND };
-        Self { text: d::TEXT, selection: d::SELECTION, scrollbar: d::SCROLLBAR, placeholder: d::PLACEHOLDER, rich }
+        let rich = TextTheme { inactive: p.selection_inactive, links, code: p.code, background: p.background };
+        Self { text: p.text, selection: p.selection, scrollbar: p.scrollbar, placeholder: p.placeholder, rich }
     }
 }
 

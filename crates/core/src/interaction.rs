@@ -162,10 +162,10 @@ impl FocusRing {
     }
 }
 
-/// 默认的焦点环：强调色，宽 1.5，离元素 2
+/// 默认的焦点环：强调色（浅色、深色两套调色板一样），宽 1.5，离元素 2
 impl Default for FocusRing {
     fn default() -> Self {
-        Self::new(crate::defaults::ACCENT)
+        Self::new(crate::defaults::Palette::LIGHT.accent)
     }
 }
 
