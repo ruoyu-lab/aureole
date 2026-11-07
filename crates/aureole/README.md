@@ -4,7 +4,7 @@
 
 重点是**性能和动画**：画面不变时不做工作；变换、透明度、滚动在渲染线程上推进，主线程忙的时候也不掉帧；所有视觉属性都能做可打断的过渡。
 
-**现在是测试版（`0.0.1-beta.1`）**，API 还会改，欢迎试用和反馈。
+**现在是测试版（`0.0.1-beta.2`）**，API 还会改，欢迎试用和反馈。
 
 ## 安装
 
@@ -12,7 +12,7 @@
 
 ```toml
 [dependencies]
-aureole = "0.0.1-beta.1"
+aureole = "0.0.1-beta.2"
 ```
 
 ## 例子
@@ -67,7 +67,7 @@ fn main() {
 装上打包工具，就能把应用打包成 macOS 的 .app 和 .dmg、Windows 的安装程序、Linux 的 .deb 和 AppImage，设置写在应用的 `Cargo.toml` 里，见教程的[打包与发布](https://github.com/ruoyu-lab/aureole/blob/master/docs/guide/23-打包与发布.md)。
 
 ```bash
-cargo install aureole-bundle --version 0.0.1-beta.1
+cargo install aureole-bundle --version 0.0.1-beta.2
 cargo bundle --release
 ```
 

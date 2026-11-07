@@ -74,7 +74,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! aureole = { version = "0.0.1-beta.1", features = ["testing"] }
+//! aureole = { version = "0.0.1-beta.2", features = ["testing"] }
 //! ```
 //!
 //! 这个 crate 是门面：只重新导出，加上特性开关。元素树、布局、文字、输入、动画在 `aureole-core`，应用、窗口、

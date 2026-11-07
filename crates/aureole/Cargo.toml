@@ -48,7 +48,7 @@ svg = ["aureole-core/svg"]
 # `spawn_tokio`、`resource_tokio`、`TokioSpawner`、`TokioPlugin`：在 tokio 运行时上跑需要它的库（reqwest、sqlx、tonic……），结果照样交回主线程
 tokio = ["aureole-core/tokio", "runtime/tokio", "dep:tokio"]
 # 测试工具：`aureole::testing`（`Harness`、回放、离屏截图）。只在开发依赖里打开：
-# [dev-dependencies] aureole = { version = "0.0.1-beta.1", features = ["testing"] }
+# [dev-dependencies] aureole = { version = "0.0.1-beta.2", features = ["testing"] }
 testing = ["dep:testing"]
 # 开发工具：`aureole::devtools`（文件热加载、重新编译后原地重启、`App::restarts_on_rebuild`）。发布的应用不开，多带一个文件监视的库
 devtools = ["dep:devtools", "runtime/devtools"]
