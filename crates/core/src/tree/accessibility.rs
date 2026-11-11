@@ -65,6 +65,8 @@ pub(crate) struct NodeProps {
     pub(super) value_text: Option<String>,
     /// 虚拟列表里的一行：(第几行，从 0 起，总行数)
     item: Option<(usize, usize)>,
+    /// 它是外面有焦点的容器里的当前项
+    pub(super) active: bool,
 }
 
 /// 已经交给辅助技术的节点
@@ -117,6 +119,10 @@ pub(crate) struct Accessibility {
     last_nodes: usize,
     /// 标签和它命名的控件的焦点句柄（`controls::Label::target`）
     labels: Vec<(NodeId, crate::interaction::FocusHandle)>,
+    /// 声明了当前项的元素（[`crate::Element::accessibility_active`]）
+    actives: Vec<NodeId>,
+    /// 已经发出去的：(有焦点的容器, 它的当前项)
+    active_links: Vec<(NodeId, NodeId)>,
 }
 
 impl Accessibility {
@@ -291,9 +297,48 @@ impl Tree {
 
     /// 虚拟列表的一行在第几行、一共几行
     pub(crate) fn accessibility_list_item(&mut self, id: NodeId, index: usize, len: usize) {
+        // 行元素自己声明了角色（表格的行）：位置记在它身上，列表包的这一层不算一项
+        let id = self.nodes.get(id).and_then(|n| n.children.first().copied()).filter(|&c| self.accessibility.props.get(c).is_some_and(|p| p.role.is_some())).unwrap_or(id);
         let item = Some((index, len));
         if self.accessibility.props.get(id).is_none_or(|p| p.item != item) {
             self.accessibility_set(id, |p| p.item = item);
+        }
+    }
+
+    /// 这个元素是不是外面有焦点的容器里的当前项，见 [`crate::Element::accessibility_active`]
+    pub(super) fn accessibility_set_active(&mut self, id: NodeId, active: bool) {
+        self.accessibility_set(id, |p| p.active = active);
+        let actives = &mut self.accessibility.actives;
+        actives.retain(|&a| a != id);
+        if active {
+            actives.push(id);
+        }
+    }
+
+    /// 重新算当前项属于哪个有焦点的容器：变了的容器重发（当前项卸载了也在这里清掉）
+    fn accessibility_link_actives(&mut self, queue: &mut Vec<NodeId>) {
+        if self.accessibility.actives.is_empty() && self.accessibility.active_links.is_empty() {
+            return;
+        }
+        let mut actives = mem::take(&mut self.accessibility.actives);
+        actives.retain(|&a| self.nodes.contains_key(a) && self.accessibility.props.get(a).is_some_and(|p| p.active));
+        let links: Vec<(NodeId, NodeId)> = actives
+            .iter()
+            .filter_map(|&item| {
+                let mut current = self.nodes.get(item)?.parent;
+                while let Some(id) = current {
+                    if self.focusable(id) {
+                        return Some((id, item));
+                    }
+                    current = self.nodes.get(id)?.parent;
+                }
+                None
+            })
+            .collect();
+        self.accessibility.actives = actives;
+        if links != self.accessibility.active_links {
+            queue.extend(self.accessibility.active_links.iter().chain(&links).map(|l| l.0));
+            self.accessibility.active_links = links;
         }
     }
 
@@ -338,6 +383,7 @@ impl Tree {
 
     fn accessibility_build(&mut self, full: bool) -> Option<TreeUpdate> {
         let mut queue = mem::take(&mut self.accessibility.dirty);
+        self.accessibility_link_actives(&mut queue);
         // 输入框打字时很长的一段可能只排到了看得见的地方：辅助技术要全部的行
         for &id in &queue {
             if let Some(editor) = self.nodes.kind_mut::<crate::editor::EditorBlock>(id)
@@ -621,6 +667,12 @@ impl Tree {
             if !text.is_empty() {
                 ax.set_label(text);
             }
+        } else if matches!(role, Role::Row | Role::Cell | Role::GridCell | Role::ColumnHeader) {
+            // 表格的行和格子：名字是里面的文字，键盘走到一行时念得出这一行的内容
+            let text = self.subtree_text(id, false);
+            if !text.is_empty() {
+                ax.set_label(text);
+            }
         } else if let Some(tooltip) = props.and_then(|p| p.tooltip.as_deref())
             && self.subtree_text(id, false).is_empty()
         {
@@ -660,10 +712,20 @@ impl Tree {
             if let Some((index, len)) = p.item {
                 ax.set_position_in_set(index + 1);
                 ax.set_size_of_set(len);
+                // 表格的行：只有部分平台读上面两个，第几行、一共几行也放进说明（只有数字，不分语言）
+                if role == Role::Row {
+                    ax.set_row_index_text((index + 1).to_string());
+                    ax.set_description(format!("{} / {len}", index + 1));
+                }
             }
         }
         if let Some((true, _)) = self.overlay_content(id) {
             ax.set_modal();
+        }
+        if let Some(&(_, item)) = self.accessibility.active_links.iter().find(|l| l.0 == id)
+            && self.accessibility.sent.contains_key(item)
+        {
+            ax.set_active_descendant(accessibility_id(item));
         }
 
         // 操作

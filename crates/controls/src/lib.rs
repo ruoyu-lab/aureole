@@ -1,5 +1,5 @@
 //! 基础控件：按钮、输入框（单行、多行、密码）、复选框、单选组、开关、下拉选择、滑块、进度条、数字输入、标签，
-//! 日历和日期选择、时间选择、颜色选择、文件选择。
+//! 日历和日期选择、时间选择、颜色选择、文件选择，表格。
 //!
 //! - **行为是完整的**：点击、键盘（空格、回车、方向键、翻页键、打字跳转）、焦点和焦点环、禁用、拖动、弹出的列表、
 //!   无障碍（角色、状态、数值、操作）都在控件里，用的时候不用自己写事件。
@@ -17,6 +17,7 @@
 //!   数字输入夹进范围之后；复选框、开关、单选组、下拉框每次改都是改完了）。代码里改绑定的信号时都不调用。
 //!   处理器也可以收整个 [`aureole_core::ChangeEvent`]（`|e: &ChangeEvent<bool>| ..`），里面还有是怎么改的（指针、键盘、
 //!   辅助技术、标签）。基础控件处理完自己的点击、按键都停止传播，外面的可点击元素不会再收到。
+//! - **表格**（[`table`]）的界面就是单元格，单元格能自己搭（[`TableColumn::view`]），没有 `.view`，别的有值的控件都有：
 //! - **有值的控件都能完全重做界面**：逻辑和界面分开，逻辑在状态类型上（[`CheckboxState`]、[`SwitchState`]、[`RadioState`]、[`SelectState`]、
 //!   [`SliderState`]、[`NumberState`]、[`CalendarState`]、[`TimeState`]、[`ColorState`]、[`FileState`]），默认的界面也只用它们。
 //!   `.view(|state| ..)` 换掉界面，绑定的信号、`on_change`、`on_commit`、范围、禁用都留着；样式对象只作用于默认的界面。
@@ -80,6 +81,7 @@ mod radio;
 mod select;
 mod slider;
 mod switch;
+mod table;
 mod time_picker;
 
 use std::cell::{Cell, RefCell};
@@ -104,11 +106,13 @@ pub use radio::{RadioGroup, RadioState, radio_group};
 pub use select::{Select, SelectState, select};
 pub use slider::{Slider, SliderState, slider};
 pub use switch::{Switch, SwitchState, switch};
+pub use table::{SortOrder, Table, TableColumn, TableSelection, TableSort, table};
 pub use time_picker::{TimePicker, TimeState, TimeTexts, time_picker};
 
 /// 基础控件一次导入（也在 `aureole::prelude` 里）
 pub mod prelude {
     pub use super::{
+        SortOrder, Table, TableColumn, TableSelection, TableSort, table,
         Calendar, CalendarState, CalendarTexts, Checkbox, CheckboxState, ColorFormat, ColorPanel, ColorPicker, ColorState, ColorTexts, DatePicker, FilePicker, FileState, FileTexts, Label, NumberField, NumberState, ProgressBar, RadioGroup, RadioState, Select, SelectState, Slider, SliderState, Switch, SwitchState, TimePicker, TimeState, TimeTexts, button, calendar, checkbox, color_panel_view, color_picker, date_picker, file_picker,
         label, number_field, progress_bar, radio_group, select, slider, switch, time_picker,
     };

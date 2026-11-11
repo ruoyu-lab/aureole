@@ -56,6 +56,16 @@ impl InstallerOptions {
     }
 }
 
+/// CEF 视图要带的东西的设置（`[package.metadata.bundle.webview]`）
+#[derive(Debug, Default)]
+pub struct WebviewOptions {
+    /// 只带这些语言包（CEF 自己的界面文字：出错的页面、表单的提示），比如 `["zh-CN"]`；不写时全带上（约 50 MB）。
+    /// 英文的总带上：找不到界面语言的语言包时用它
+    pub locales: Vec<String>,
+    /// Windows 上开沙箱（页面的子进程受系统限制）：应用编成动态库，由改名成应用名的 `bootstrap.exe` 加载（macOS 上默认就开着，不用设）
+    pub sandbox: bool,
+}
+
 #[derive(Debug)]
 pub struct BundleOptions {
     /// Cargo 包名（.deb 的包名用它）
@@ -72,9 +82,14 @@ pub struct BundleOptions {
     pub nsis: NsisOptions,
     /// 自己的安装程序（`[package.metadata.bundle.installer]`）
     pub installer: InstallerOptions,
+    /// 包直接依赖 CEF 视图时有：多带子进程程序和 CEF 的运行文件（`[package.metadata.bundle.webview]`）
+    pub webview: Option<WebviewOptions>,
     pub identifier: String,
-    /// 给人看的版本号（CFBundleShortVersionString）
+    /// 给人看的版本号，只有数字和点（CFBundleShortVersionString、Windows 的文件版本这类系统只认数字的地方）
     pub version: String,
+    /// 写的什么就是什么的版本号（带预发布、构建部分，比如 `0.2.1-beta`）：自己的安装程序显示它，
+    /// 写进"应用和功能"的显示版本（那里是字符串），安装程序的文件名也用它
+    pub full_version: String,
     /// 构建号（CFBundleVersion）
     pub build: String,
     /// 可执行文件名（包里的 bin）
@@ -143,7 +158,7 @@ impl BundleOptions {
         let full_version = overrides.version.or_else(|| text("version")).or_else(|| package["version"].as_str().map(str::to_owned)).unwrap_or_else(|| "0.1.0".into());
         let version = numeric_version(&full_version);
         if version != full_version {
-            notes.push(format!("版本号 {full_version} 去掉了预发布和构建部分，写成 {version}（系统只认数字和点）"));
+            notes.push(format!("版本号 {full_version} 在只认数字的地方（应用包的版本、文件版本）写成 {version}，安装程序里照原样显示"));
         }
         let build = text("build").unwrap_or_else(|| version.clone());
 
@@ -196,16 +211,22 @@ impl BundleOptions {
             bin: installer_table["bin"].as_str().map(str::to_owned),
             publisher: installer_table["publisher"].as_str().map(str::to_owned),
         };
+        let webview = crate::webview::used_by(package).then(|| WebviewOptions {
+            locales: meta["webview"]["locales"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
+            sandbox: meta["webview"]["sandbox"].as_bool().unwrap_or(false),
+        });
         let options = BundleOptions {
             package: package_name.to_owned(),
             nsis,
             installer,
+            webview,
             name,
             description: package["description"].as_str().filter(|d| !d.is_empty()).map(str::to_owned),
             maintainer,
             linux_depends: meta["linux-depends"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
             identifier,
             version,
+            full_version,
             build,
             bin,
             category,

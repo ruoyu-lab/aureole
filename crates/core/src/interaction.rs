@@ -246,6 +246,8 @@ pub(crate) struct Interaction {
     pub memo: Option<Box<crate::style::StyleMemo>>,
     /// 报告用户改值的句柄（见 `field.rs`）：挂载时记下节点
     pub field_handle: Option<crate::field::FieldHandle>,
+    /// 元素的句柄（滚进视口，见 `scroll.rs`）：挂载时绑上
+    pub element_handle: Option<crate::scroll::ElementHandle>,
 }
 
 impl Element {
@@ -645,12 +647,23 @@ pub fn is_key_down(name: &str) -> bool {
 
 // ---- 快捷键 ----
 
-/// 一个组合键：修饰键 + 按键
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 一个组合键：修饰键 + 按键。`CmdOrCtrl` 不在解析时定成哪个键，比较时按此刻的平台惯例换（[`Chord::modifiers`]）：
+/// 注册快捷键早于装好系统那一侧时（测试里先建界面、再建测试工具）也对得上
+#[derive(Clone, Debug)]
 pub struct Chord {
     modifiers: Modifiers,
+    /// 写了 `CmdOrCtrl`：还要平台的主修饰键
+    primary: bool,
     key: ChordKey,
 }
+
+impl PartialEq for Chord {
+    fn eq(&self, other: &Self) -> bool {
+        self.modifiers() == other.modifiers() && self.key == other.key
+    }
+}
+
+impl Eq for Chord {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ChordKey {
@@ -665,13 +678,17 @@ impl Chord {
     /// 加号本身写 `Plus`，空格写 `Space`
     pub fn parse(spec: &str) -> Option<Self> {
         let mut modifiers = Modifiers::empty();
+        let mut primary = false;
         let parts: Vec<&str> = spec.split('+').map(str::trim).collect();
         let (last, mods) = parts.split_last()?;
         for m in mods {
             modifiers |= match m.to_ascii_lowercase().as_str() {
                 "cmd" | "command" | "super" | "meta" => Modifiers::SUPER,
                 "ctrl" | "control" => Modifiers::CONTROL,
-                "cmdorctrl" | "commandorcontrol" | "primary" => primary(),
+                "cmdorctrl" | "commandorcontrol" | "primary" => {
+                    primary = true;
+                    Modifiers::empty()
+                }
                 "alt" | "option" => Modifiers::ALT,
                 "shift" => Modifiers::SHIFT,
                 _ => return None,
@@ -702,13 +719,18 @@ impl Chord {
             None if last.chars().count() == 1 => ChordKey::Char(lower),
             None => return None,
         };
-        Some(Self { modifiers, key })
+        Some(Self { modifiers, primary, key })
+    }
+
+    /// 要按着的修饰键：写了 `CmdOrCtrl` 的按此刻的平台惯例加上主修饰键（macOS 上是 Cmd，其他平台是 Ctrl）
+    pub fn modifiers(&self) -> Modifiers {
+        if self.primary { self.modifiers | primary() } else { self.modifiers }
     }
 
     /// 修饰键要完全一致；字符不分大小写，也和不算修饰键的按键比较（Shift+/ 按出来的是 `?`）
     pub fn matches(&self, key: &Key, base: &Key, modifiers: Modifiers) -> bool {
         let mask = Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER;
-        if modifiers & mask != self.modifiers {
+        if modifiers & mask != self.modifiers() {
             return false;
         }
         self.same_key(key) || self.same_key(base)
@@ -730,7 +752,7 @@ impl Chord {
             ChordKey::Named(named) => Key::Named(*named),
             ChordKey::Char(c) => Key::Character(c.as_str().into()),
         };
-        (key, self.modifiers)
+        (key, self.modifiers())
     }
 }
 

@@ -32,7 +32,7 @@ pub(crate) use files::{external_drag_leave, external_drag_over, external_drop, f
 pub(crate) use gesture::{pinch, rotate};
 pub(crate) use keys::{ime, key_down, key_up, release_keys, set_modifiers};
 pub(in crate::tree) use keys::finish_edit;
-pub(crate) use pointer::{cancel_pointer, mouse_button, pointer_move, refresh_hover};
+pub(crate) use pointer::{cancel_pointer, hand_off, mouse_button, pointer_move, refresh_hover};
 pub(in crate::tree) use dispatch::{Options, RoutePath, deliver, dispatch};
 pub(in crate::tree) use hit::HitPath;
 pub(crate) use touch::{touch_cancel, touch_down, touch_move, touch_up};

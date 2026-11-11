@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::associations::{self, Role};
 use crate::icon;
 use crate::options::BundleOptions;
+use crate::webview::Runtime;
 
 /// 验证过的 cargo-packager 版本：配置的键和它的版本有关
 pub const PACKAGER_VERSION: &str = "0.11.8";
@@ -120,7 +121,7 @@ fn maintainer(options: &BundleOptions) -> String {
     options.maintainer.clone().unwrap_or_else(|| format!("{} <noreply@example.com>", options.name))
 }
 
-/// 准备好的文件：图标（PNG 和 .ico）、MIME 声明、安装界面的图
+/// 准备好的文件：图标（PNG 和 .ico）、MIME 声明、安装界面的图，CEF 视图的子进程程序和 CEF 的运行文件
 #[derive(Default)]
 pub struct Prepared {
     pub icons: Vec<PathBuf>,
@@ -128,6 +129,7 @@ pub struct Prepared {
     pub header_bmp: Option<PathBuf>,
     pub sidebar_bmp: Option<PathBuf>,
     pub installer_icon: Option<PathBuf>,
+    pub webview: Option<Runtime>,
 }
 
 /// cargo-packager 的配置。`exe` 是编好的可执行文件
@@ -145,7 +147,16 @@ pub fn config(options: &BundleOptions, exe: &Path, prepared: &Prepared, target: 
     // .deb 必须有说明
     config.insert("description".into(), json!(options.description.clone().unwrap_or_else(|| options.name.clone())));
     config.insert("binariesDir".into(), json!(text(directory)));
-    config.insert("binaries".into(), json!([{ "path": file_name, "main": true }]));
+    let mut binaries = vec![json!({ "path": file_name, "main": true })];
+    if let Some(helper) = prepared.webview.as_ref().and_then(|runtime| runtime.helper.as_ref()) {
+        // 子进程程序和应用在同一个目录里（都是处理过的拷贝），装到应用旁边
+        let name = helper.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("子进程程序的路径 {} 不对", helper.display()))?;
+        if helper.parent() != Some(directory) {
+            return Err(format!("子进程程序 {} 要和应用在同一个目录里", helper.display()));
+        }
+        binaries.push(json!({ "path": name, "main": false }));
+    }
+    config.insert("binaries".into(), json!(binaries));
     config.insert("icons".into(), json!(icons.iter().map(|p| text(p)).collect::<Vec<_>>()));
     config.insert("authors".into(), json!([maintainer(options)]));
     if let Some(copyright) = &options.copyright {
@@ -174,12 +185,16 @@ pub fn config(options: &BundleOptions, exe: &Path, prepared: &Prepared, target: 
             .collect();
         config.insert("fileAssociations".into(), json!(documents));
     }
-    if !options.resources.is_empty() {
-        let mut resources = Vec::new();
-        for resource in &options.resources {
-            let name = resource.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("资源路径 {} 没有文件名", resource.display()))?;
-            resources.push(json!({ "src": text(resource), "target": name }));
-        }
+    let mut resources = Vec::new();
+    for resource in &options.resources {
+        let name = resource.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("资源路径 {} 没有文件名", resource.display()))?;
+        resources.push(json!({ "src": text(resource), "target": name }));
+    }
+    // CEF 的运行文件按资源放：Windows 上资源装在安装目录里，就在应用旁边
+    for (target, source) in prepared.webview.iter().flat_map(|runtime| &runtime.files) {
+        resources.push(json!({ "src": text(source), "target": target }));
+    }
+    if !resources.is_empty() {
         config.insert("resources".into(), json!(resources));
     }
     let depends: Vec<&str> = DEB_DEPENDS.iter().copied().chain(options.linux_depends.iter().map(String::as_str)).collect();
@@ -207,8 +222,8 @@ pub fn config(options: &BundleOptions, exe: &Path, prepared: &Prepared, target: 
     Ok(Value::Object(config))
 }
 
-/// 打 `formats` 里的包，放进 `out_dir`
-pub fn package(options: &BundleOptions, exe: &Path, formats: &[Format], target: Option<&str>, out_dir: &Path) -> Result<(), String> {
+/// 打 `formats` 里的包，放进 `out_dir`。`webview` 是用到 CEF 视图时要多带的
+pub fn package(options: &BundleOptions, exe: &Path, webview: Option<&Runtime>, formats: &[Format], target: Option<&str>, out_dir: &Path) -> Result<(), String> {
     let names: Vec<&str> = formats.iter().filter_map(|f| f.packager_name()).collect();
     if names.is_empty() {
         return Ok(());
@@ -228,7 +243,7 @@ pub fn package(options: &BundleOptions, exe: &Path, formats: &[Format], target: 
         }
         None => None,
     };
-    let mut prepared = Prepared { icons, mime, ..Prepared::default() };
+    let mut prepared = Prepared { icons, mime, webview: webview.cloned(), ..Prepared::default() };
     if formats.contains(&Format::Nsis) {
         // 安装界面的图只认 24 位的 BMP：用户给什么格式都换成它
         let bmp = |source: &Option<PathBuf>, size: [u32; 2], name: &str| -> Result<Option<PathBuf>, String> {

@@ -90,7 +90,10 @@ impl fmt::Display for DefinedAt {
         #[cfg(debug_assertions)]
         return write!(f, "（在 {} 创建）", self.location);
         #[cfg(not(debug_assertions))]
-        Ok(())
+        {
+            let _ = f;
+            Ok(())
+        }
     }
 }
 

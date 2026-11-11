@@ -11,7 +11,7 @@ use reactive::batch;
 use super::super::interaction::{Held, KeyScroll};
 use super::super::{Edited, NodeId, Tree, TreeRef};
 use super::dispatch::{Options, dispatch, dispatch_capture};
-use super::pointer::cancel_drag_drop;
+use super::pointer::{cancel_drag_drop, send_click};
 use super::run_focus_callbacks;
 use crate::event::{ClickSource, Builtin, ChangeEvent, ChangeSource, ClickEvent, KeyEvent, PropagationPhase};
 use crate::handlers::{EventType, Handler};
@@ -216,6 +216,7 @@ fn release(tree: &TreeRef, held: Held, modifiers: Modifiers) -> bool {
 }
 
 /// 内置行为（没被停止、没被取消时）：Tab / Shift+Tab 切换焦点（`TAB`）；回车、空格激活有焦点的可点击元素（`ACTIVATE`）；
+/// 菜单键、Shift+F10 在焦点上合成右键点击（`CONTEXT_MENU`）；
 /// 方向键、翻页键、Home / End、空格滚动焦点（没有焦点时是指针下）所在的滚动视口（`SCROLL`）
 fn builtin(tree: &TreeRef, event: &KeyEvent) -> bool {
     let Key::Named(key) = event.key else { return false };
@@ -229,6 +230,12 @@ fn builtin(tree: &TreeRef, event: &KeyEvent) -> bool {
             true
         }
         NamedKey::Enter | NamedKey::Space if plain && !prevented(Builtin::ACTIVATE) && activate(tree) => true,
+        // 菜单键、Shift+F10：焦点上的右键菜单
+        NamedKey::ContextMenu | NamedKey::F10
+            if (key == NamedKey::ContextMenu && plain || key == NamedKey::F10 && mods == Modifiers::SHIFT) && !prevented(Builtin::CONTEXT_MENU) =>
+        {
+            keyboard_context_menu(tree)
+        }
         _ if prevented(Builtin::SCROLL) => false,
         _ => {
             let action = match (key, mods.has_shift()) {
@@ -280,9 +287,26 @@ fn activate(tree: &TreeRef) -> bool {
     true
 }
 
+/// 菜单键、Shift+F10：像在焦点上点了右键（来源是键盘，位置是元素正中），和右键一样往外冒泡、输入框不往外传。
+/// 没有焦点、焦点往外没有元素接右键时不算处理
+fn keyboard_context_menu(tree: &TreeRef) -> bool {
+    let (id, event) = {
+        let t = tree.borrow();
+        let Some(id) = t.router.focused().filter(|&id| !t.disabled(id)) else { return false };
+        if !t.route_path(id).iter().any(|&n| t.listens(n, EventType::SecondaryClick) && !t.disabled(n)) {
+            return false;
+        }
+        (id, t.click_event(id, ClickSource::Keyboard, MouseButton::Right, 1))
+    };
+    send_click(tree, id, EventType::SecondaryClick, event);
+    true
+}
+
 /// 修饰键变了（指针事件、Shift+点击扩展选区要用）
 pub(crate) fn set_modifiers(tree: &TreeRef, modifiers: Modifiers) {
     tree.borrow_mut().set_modifiers(modifiers);
+    // 按住 Control 转滚轮的缩放：松开 Control 时结束
+    super::super::scrolling::wheel_modifiers(tree, modifiers);
 }
 
 /// 输入法事件，交给焦点上的文字输入客户端（不传播）

@@ -44,7 +44,8 @@ pub fn cancel_file_dialogs() -> usize {
     native().dialog().cancel_file_dialogs()
 }
 
-/// 用系统默认的应用打开网址，返回是否交给了系统
+/// 用系统默认的应用打开网址，返回是否交给了系统。Windows：要有协议名（`https:`、`mailto:`、自定义协议……），
+/// 本机路径、共享路径、`file:` 都不收（外壳会直接运行它们；打开文件用 [`open_path`]），在后台线程上交给外壳
 pub fn open_url(url: &str) -> bool {
     native().shell().open_url(url).is_ok()
 }
@@ -89,6 +90,30 @@ pub fn notify(title: &str, body: &str) -> bool {
 /// 通知里显示的应用名（Linux 用；macOS 读 Info.plist，Windows 按应用标识）
 pub fn set_app_name(name: &str) {
     native().notification().set_app_name(name);
+}
+
+/// 声明进程的应用标识（Windows 的 AppUserModelID），用打包时的包标识符（安装程序建的开始菜单快捷方式上写的就是它）。
+/// 要在建第一个窗口之前调用：任务栏按它分组，系统通知按它显示，不管应用是怎么启动的（快捷方式、双击文档、协议链接、命令行）。
+/// 通知还要这个标识在系统里登记过（开始菜单里有带它的快捷方式，或者注册表里有 `Software\Classes\AppUserModelId\<标识>`），
+/// 没登记过时（`cargo run`）照旧不发、把内容记在日志里。标识不能有空格、最长 128 个字符；写得不对、系统不收时返回 `false`。
+/// 别的平台按包的信息认应用，什么都不做，返回 `false`
+pub fn set_app_user_model_id(id: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    return windows::set_app_user_model_id(id);
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = id;
+        false
+    }
+}
+
+/// 打包时写进可执行文件的包标识符（Windows：`cargo bundle` 把 `identifier` 写成一个资源，见 `aureole-bundle`）。
+/// 运行时在建第一个窗口之前用它声明应用标识（[`set_app_user_model_id`]）。没打包（`cargo run`）、别的平台是 `None`
+pub fn embedded_app_id() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    return windows::embedded_app_id();
+    #[cfg(not(target_os = "windows"))]
+    None
 }
 
 /// 在后台监视系统设置，深浅色、减少动态效果、强调色变了时调用 `on_change`（在后台线程里）。
@@ -280,7 +305,7 @@ pub(crate) mod macos {
         }
     }
 
-    fn ns_window(window: &dyn HasWindowHandle) -> Option<Retained<NSWindow>> {
+    pub(crate) fn ns_window(window: &dyn HasWindowHandle) -> Option<Retained<NSWindow>> {
         let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
         };

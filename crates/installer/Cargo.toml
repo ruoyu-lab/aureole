@@ -22,7 +22,7 @@ ui = ["dep:aureole"]
 flate2.workspace = true
 serde_json.workspace = true
 # 不要默认特性：分词词典、字符网格、菜单栏安装程序都用不到，少几 MB
-aureole = { path = "../aureole", version = "0.0.1-beta.2", optional = true, default-features = false }
+aureole = { path = "../aureole", version = "0.0.1-beta.3", optional = true, default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Registry", "Win32_UI_Shell"] }

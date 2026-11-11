@@ -409,6 +409,10 @@ impl Tree {
             } else {
                 place(anchor, size, host.placement, host.offset, host.margin, window)
             };
+            // 再对齐到物理像素：浮层是一个合成层，落在半个物理像素上时（150% 缩放下逻辑坐标是奇数）合成时按半个像素采样，
+            // 里面的字和线都糊了。100%、200% 时逻辑像素的整数就是物理像素的整数，这一步不改
+            let scale = self.text.scale();
+            let position = position.map(|v| snap_to_device(v, scale));
             let (wrapper_id, closing) = (host.wrapper, host.closing);
             // 高度上限：放的那一边能用的高度。只在内容顶到了上限（被限制着，或者放不下了）时改，
             // 改了要再布局一次（同一帧里），这次先不把焦点滚进来
@@ -528,6 +532,11 @@ pub(crate) fn place(anchor: Rect, size: [f32; 2], placement: Placement, offset: 
     }
     let height = if main == 1 { room(side) } else { window.height - 2.0 * margin };
     (position, Placement { side, edge: placement.edge }, height)
+}
+
+/// 逻辑坐标对齐到物理像素（`scale` 是窗口的缩放）
+fn snap_to_device(value: f32, scale: f32) -> f32 {
+    if scale > 0.0 { (value * scale).round() / scale } else { value }
 }
 
 /// 一帧结束后：把实际放的位置写进信号。返回有没有写

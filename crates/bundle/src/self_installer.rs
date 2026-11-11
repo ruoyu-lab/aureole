@@ -6,12 +6,13 @@ use aureole_installer::{Builder, DocumentType, Manifest};
 
 use crate::icon;
 use crate::options::BundleOptions;
+use crate::webview::Runtime;
 
 /// 默认的安装程序：应用没写自己的时用它
 pub const DEFAULT_STUB: (&str, &str) = ("aureole-installer", "aureole-setup");
 
 /// 发布者：设置里写的，或者维护者的名字（去掉邮箱），都没有时是应用名
-fn publisher(options: &BundleOptions) -> String {
+pub fn publisher(options: &BundleOptions) -> String {
     if let Some(publisher) = &options.installer.publisher {
         return publisher.clone();
     }
@@ -31,7 +32,7 @@ pub fn manifest(options: &BundleOptions, executable: &str, icon: Option<String>)
     Manifest {
         name: options.name.clone(),
         identifier: options.identifier.clone(),
-        version: options.version.clone(),
+        version: options.full_version.clone(),
         publisher: publisher(options),
         executable: executable.to_owned(),
         icon,
@@ -45,11 +46,12 @@ pub fn manifest(options: &BundleOptions, executable: &str, icon: Option<String>)
 fn file_name(options: &BundleOptions, target: Option<&str>, os: &str) -> String {
     let arch = target.and_then(|t| t.split('-').next()).unwrap_or(std::env::consts::ARCH);
     let extension = if os == "windows" { ".exe" } else { "" };
-    format!("{}_{}_{arch}-installer{extension}", options.bin, options.version)
+    format!("{}_{}_{arch}-installer{extension}", options.bin, options.full_version)
 }
 
-/// 拼出安装程序。`exe` 是要放进去的应用，`stub` 是安装程序本身（都处理过了：去符号、嵌图标）
-pub fn package(options: &BundleOptions, exe: &Path, stub: &Path, target: Option<&str>, os: &str, out_dir: &Path) -> Result<PathBuf, String> {
+/// 拼出安装程序。`exe` 是要放进去的应用，`stub` 是安装程序本身（都处理过了：去符号、嵌图标），
+/// `webview` 是用到 CEF 视图时要多带的（子进程程序和 CEF 的运行文件都装在应用旁边）
+pub fn package(options: &BundleOptions, exe: &Path, webview: Option<&Runtime>, stub: &Path, target: Option<&str>, os: &str, out_dir: &Path) -> Result<PathBuf, String> {
     let work = out_dir.join("installer-files");
     std::fs::create_dir_all(&work).map_err(|e| format!("创建 {} 失败：{e}", work.display()))?;
     let executable = exe.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("可执行文件的路径 {} 不对", exe.display()))?.to_owned();
@@ -67,6 +69,15 @@ pub fn package(options: &BundleOptions, exe: &Path, stub: &Path, target: Option<
 
     let mut builder = Builder::new(manifest(options, &executable, icon.clone()));
     builder.add(&executable, exe, true);
+    if let Some(runtime) = webview {
+        if let Some(helper) = &runtime.helper {
+            let name = helper.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("子进程程序的路径 {} 不对", helper.display()))?;
+            builder.add(name, helper, true);
+        }
+        for (path, source) in &runtime.files {
+            builder.add(path, source, false);
+        }
+    }
     if icon.is_some() {
         builder.add(icon_name, &icon_file, false);
     }

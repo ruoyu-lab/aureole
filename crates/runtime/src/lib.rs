@@ -28,6 +28,7 @@ mod open;
 mod pacing;
 pub mod performance;
 mod plugin;
+mod print;
 mod render_thread;
 #[cfg(feature = "devtools")]
 pub mod restart;
@@ -40,15 +41,17 @@ mod window;
 pub use app::App;
 pub use aureole_core::FileDialog;
 pub use display_color::{ColorOutput, DisplayColor, display_color};
+pub use external_drag::accept_drop_format;
 #[cfg(feature = "menus")]
 pub use menu::{Menu, MenuItem, Submenu, Tray};
 pub use notification::Notification;
 pub use open::{OpenRequest, OpenSource, SingleInstance};
 #[cfg(feature = "tokio")]
 pub use plugin::TokioPlugin;
-pub use plugin::{FrameInfo, PlatformEvent, PlatformEventKind, Plugin};
+pub use plugin::{FrameInfo, PlatformEvent, PlatformEventKind, Plugin, at_exit};
+pub use print::{PageSetup, PrintJob, PrintOutcome, shared_gpu};
 pub use render_thread::{GroupCacheStats, group_cache_stats, set_group_cache_budget};
 pub use render::{GpuError, GpuPreference};
 pub use platform::{Capabilities, FrameClockKind, PlatformError, TitleBar, WindowMaterial};
-pub use system::{appearance, beep, capabilities, displays, notify, open_path, open_url, is_motion_reduced, reveal_path, system_accent_color, system_appearance};
+pub use system::{appearance, beep, capabilities, displays, notify, open_path, open_url, is_low_power_mode, is_motion_reduced, reveal_path, system_accent_color, system_appearance};
 pub use window::{CloseRequest, Window, WindowHandle, current_window, quit};

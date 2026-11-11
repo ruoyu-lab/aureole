@@ -117,7 +117,11 @@ impl Setup {
                 let session = *session;
                 let title = format!("{} {}", session.manifest().name, session.manifest().version);
                 let configure = self.configure;
+                // 退出前记下卸载到了哪一步：只有卸完了才删原来的卸载程序
+                let cleanup = std::rc::Rc::new(std::cell::Cell::new(Cleanup::CopyOnly));
+                let record = cleanup.clone();
                 App::new(move || ui(session))
+                    .on_exit(move || record.set(Cleanup::after(&session.state().get_untracked())))
                     .window(move |window| {
                         // 关窗口时还在装：先取消，撤销完了再关。不然进程没了，装到一半的留在那里
                         let window = window.title(title).size(620, 440).resizable(false).on_close_request(move |request: &aureole::CloseRequest| {
@@ -133,7 +137,7 @@ impl Setup {
                     })
                     .run();
                 if let Some(directory) = relocated {
-                    delete_self_later(&directory);
+                    delete_self_later(&directory, cleanup.get());
                 }
                 ExitCode::SUCCESS
             }
@@ -169,11 +173,12 @@ impl Setup {
         }
         if command.silent {
             let directory = directory.unwrap_or_else(|| default_directory(package.manifest()));
-            let code = run_silent(package, mode, directory.clone(), &command, &self.factories);
+            let succeeded = run_silent(package, mode, directory.clone(), &command, &self.factories);
             if command.relocated {
-                delete_self_later(&directory);
+                // 卸载失败（已经撤销）时原来的卸载程序要留着，下次还能卸
+                delete_self_later(&directory, if succeeded { Cleanup::Installation } else { Cleanup::CopyOnly });
             }
-            return Ok(Prepared::Handled(code));
+            return Ok(Prepared::Handled(if succeeded { ExitCode::SUCCESS } else { ExitCode::FAILURE }));
         }
         let session = Session::new(package, mode, directory, self.factories.clone());
         session.menu_shortcut().set(!command.no_menu_shortcut);
@@ -192,15 +197,33 @@ enum Prepared {
     },
 }
 
-fn run_silent(package: Package, mode: Mode, directory: PathBuf, command: &Command, factories: &[StepFactory]) -> ExitCode {
+/// 不开窗口地装或卸，成功时返回真（失败的原因打到标准错误）
+fn run_silent(package: Package, mode: Mode, directory: PathBuf, command: &Command, factories: &[StepFactory]) -> bool {
     let options = InstallOptions { directory, menu_shortcut: !command.no_menu_shortcut, desktop_shortcut: !command.no_desktop_shortcut, register: true };
     let steps = factories.iter().map(|make| make()).collect();
     match run_engine(mode, package, options, steps, &CancelToken::default(), |_| {}) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => true,
         Err(error) => {
             report(&error.to_string());
-            ExitCode::FAILURE
+            false
         }
+    }
+}
+
+/// 临时目录里的卸载程序结束时收拾到哪一步
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cleanup {
+    /// 只删临时的这份：没卸（关了窗口、取消）、卸载失败（已经撤销）时，原来的 `uninstall.exe` 留着，
+    /// 应用还在，"应用和功能"里的卸载还要用它
+    CopyOnly,
+    /// 卸完了：再删原来的 `uninstall.exe`，安装目录空了就删目录
+    Installation,
+}
+
+impl Cleanup {
+    /// 卸载停在 `state` 时收拾到哪一步：只有完成了才动安装目录
+    fn after(state: &State) -> Self {
+        if *state == State::Done { Self::Installation } else { Self::CopyOnly }
     }
 }
 
@@ -223,14 +246,15 @@ fn relocate(directory: &std::path::Path, command: &Command) -> Result<ExitCode, 
     Ok(ExitCode::SUCCESS)
 }
 
-/// 临时目录里的卸载程序结束之后收拾：删掉自己；原来的 `uninstall.exe`（`--silent` 时它一直开着，等这边的退出码，
-/// 卸载时删不掉）和空了的安装目录。Windows 上运行中的程序删不掉，让命令行等它们都退出了再删
-fn delete_self_later(directory: &std::path::Path) {
+/// 临时目录里的卸载程序结束之后收拾：删掉自己；卸完了的话（[`Cleanup::Installation`]）再删原来的 `uninstall.exe`
+/// （`--silent` 时它一直开着，等这边的退出码，卸载时删不掉）和空了的安装目录。
+/// Windows 上运行中的程序删不掉，让命令行等它们都退出了再删
+fn delete_self_later(directory: &std::path::Path, cleanup: Cleanup) {
     #[cfg(windows)]
     if let Ok(exe) = std::env::current_exe() {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let script = cleanup_script(&exe, directory);
+        let script = cleanup_script(&exe, directory, cleanup);
         // 引号要原样交给 cmd：标准库的转义（\"）它不认
         // 输出不接到调用的人那里：否则它要等这个命令结束才读完（多等两秒），还会看到 rmdir 的报错
         let _ = std::process::Command::new("cmd")
@@ -242,14 +266,21 @@ fn delete_self_later(directory: &std::path::Path) {
             .spawn();
     }
     #[cfg(not(windows))]
-    let _ = directory;
+    let _ = (directory, cleanup);
 }
 
-/// 收拾用的命令：等两秒，删临时的这份、原来的卸载程序，目录空了就删目录（`rmdir` 不带 `/s`，有别的文件时不动）
+/// 收拾用的命令：等两秒，删临时的这份；卸完了的话再删原来的卸载程序，目录空了就删目录
+/// （`rmdir` 不带 `/s`，有别的文件时不动）
 #[cfg_attr(not(windows), allow(dead_code, reason = "只有 Windows 的卸载程序要这样收拾"))]
-fn cleanup_script(exe: &std::path::Path, directory: &std::path::Path) -> String {
-    let uninstaller = directory.join(UNINSTALLER_NAME);
-    format!("ping -n 3 127.0.0.1 >nul & del /q \"{}\" & del /q \"{}\" & rmdir \"{}\"", exe.display(), uninstaller.display(), directory.display())
+fn cleanup_script(exe: &std::path::Path, directory: &std::path::Path, cleanup: Cleanup) -> String {
+    let copy = format!("ping -n 3 127.0.0.1 >nul & del /q \"{}\"", exe.display());
+    match cleanup {
+        Cleanup::CopyOnly => copy,
+        Cleanup::Installation => {
+            let uninstaller = directory.join(UNINSTALLER_NAME);
+            format!("{copy} & del /q \"{}\" & rmdir \"{}\"", uninstaller.display(), directory.display())
+        }
+    }
 }
 
 /// 打印原因（`--silent` 时调用方看标准错误；开窗口之前出的错，比如不是安装包）

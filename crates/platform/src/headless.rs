@@ -50,13 +50,20 @@ impl HasDisplayHandle for HeadlessWindow {
     }
 }
 
+/// 一次打印：印了什么
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeadlessPrint {
+    /// 打印队列里的名字
+    pub title: String,
+    /// 每一页
+    pub pages: Vec<RgbaImage>,
+}
+
 /// 一次拖到应用外面
 #[derive(Clone, Debug, PartialEq)]
 pub struct HeadlessDrag {
-    /// 拖的文件
-    pub files: Vec<PathBuf>,
-    /// 拖的文字
-    pub text: Option<String>,
+    /// 拖的内容
+    pub content: ClipboardContent,
     /// 起点，逻辑像素
     pub at: [f32; 2],
 }
@@ -105,6 +112,7 @@ struct State {
     pointer: Option<[f32; 2]>,
     secure_input: bool,
     drags: Vec<HeadlessDrag>,
+    prints: Vec<HeadlessPrint>,
     menu_bar: Option<Menu>,
     tray: Option<Tray>,
     title_bar: Option<(TitleBarOptions, OnTitleBarChange)>,
@@ -186,6 +194,7 @@ impl HeadlessBackend {
             supports_clipboard_files: true,
             supports_clipboard_rich_text: true,
             supports_clipboard_multiple_formats: true,
+            supports_clipboard_custom: true,
             supports_file_dialog: true,
             supports_notification: true,
             supports_notification_actions: true,
@@ -201,6 +210,7 @@ impl HeadlessBackend {
             supports_title_bar_controls: true,
             supports_snap_layouts: true,
             supports_window_backdrop: true,
+            supports_print: true,
         };
         Self {
             capabilities,
@@ -227,6 +237,7 @@ impl HeadlessBackend {
                 pointer: None,
                 secure_input: false,
                 drags: Vec::new(),
+                prints: Vec::new(),
                 menu_bar: None,
                 tray: None,
                 title_bar: None,
@@ -347,6 +358,11 @@ impl HeadlessBackend {
     /// 拖到应用外面过的东西
     pub fn drags(&self) -> Vec<HeadlessDrag> {
         self.lock().drags.clone()
+    }
+
+    /// 印过的（[`DialogService::print`] 交来的）
+    pub fn prints(&self) -> Vec<HeadlessPrint> {
+        self.lock().prints.clone()
     }
 
     /// 装着的菜单栏
@@ -576,22 +592,18 @@ impl WindowService for HeadlessBackend {
         false
     }
 
-    /// 记下拖了什么，马上以"没被接住"结束（在调用方的线程上调用 `on_end(false)`）
+    /// 记下拖了什么（空的也记：应用自己的窗口之间拖元素），马上以"没被接住"结束（在调用方的线程上调用 `on_end(false)`）
     fn begin_drag_out(
         &self,
         _window: &dyn HasWindowHandle,
-        files: &[PathBuf],
-        text: Option<&str>,
+        content: &ClipboardContent,
         at: [f32; 2],
         on_end: Box<dyn FnOnce(bool)>,
     ) -> Result<(), PlatformError> {
         if !self.caps().supports_drag_out {
             return Err(unsupported("拖到应用外面"));
         }
-        if files.is_empty() && text.is_none() {
-            return Err(PlatformError::System("没有东西可拖".into()));
-        }
-        self.lock().drags.push(HeadlessDrag { files: files.to_vec(), text: text.map(str::to_owned), at });
+        self.lock().drags.push(HeadlessDrag { content: content.clone(), at });
         on_end(false);
         Ok(())
     }
@@ -748,6 +760,11 @@ impl ClipboardService for HeadlessBackend {
         Ok(self.lock().clipboard.files.clone())
     }
 
+    fn read_custom(&self, format: &str) -> Result<Option<Vec<u8>>, PlatformError> {
+        self.clipboard_allows(self.capabilities.supports_clipboard_custom)?;
+        Ok(self.lock().clipboard.custom.iter().find(|(name, _)| name == format).map(|(_, bytes)| bytes.clone()))
+    }
+
     /// 能力关掉的格式放不进去：一次只能放一种时只留最优先的（文件、图片、文字），和本机后端一样
     fn write(&self, content: &ClipboardContent) -> Result<(), PlatformError> {
         let caps = self.capabilities;
@@ -764,6 +781,9 @@ impl ClipboardService for HeadlessBackend {
         }
         if !caps.supports_clipboard_rich_text {
             kept.rich_text = None;
+        }
+        if !caps.supports_clipboard_custom {
+            kept.custom.clear();
         }
         if !caps.supports_clipboard_multiple_formats {
             if !kept.files.is_empty() {
@@ -802,6 +822,26 @@ impl DialogService for HeadlessBackend {
 
     fn alert(&self, title: &str, message: &str) {
         self.lock().alerts.push((title.to_owned(), message.to_owned()));
+    }
+
+    /// 马上选好：A4 纸，四边各 18 点印不到，300 点每英寸
+    fn print_dialog(&self, _parent: Option<&dyn HasWindowHandle>, done: crate::PrintDialogDone) {
+        if !self.capabilities.supports_print {
+            return done(Err(unsupported("打印")));
+        }
+        let paper = [595.28, 841.89];
+        done(Ok(Some(crate::PrintSetup { paper, printable: [18.0, 18.0, paper[0] - 36.0, paper[1] - 36.0], dpi: 300.0, id: crate::print::next_id() })));
+    }
+
+    /// 记下印了什么（没有页时不记），马上完成
+    fn print(&self, _setup: crate::PrintSetup, title: &str, pages: Vec<RgbaImage>, done: crate::PrintDone) {
+        if let Err(error) = crate::print::check_pages(&pages) {
+            return done(Err(error));
+        }
+        if !pages.is_empty() {
+            self.lock().prints.push(HeadlessPrint { title: title.to_owned(), pages });
+        }
+        done(Ok(true));
     }
 }
 

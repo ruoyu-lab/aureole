@@ -725,10 +725,20 @@ impl Document {
                 Some(flow) => flow.previous_logical_word(text, local),
                 None => cursor.previous_logical_word(layout).index(),
             }),
-            (true, Reach::Word) => segmentation::next_word_end(text, local).unwrap_or_else(|| match &para.flow {
-                Some(flow) => flow.next_logical_word(text, local),
-                None => cursor.next_logical_word(layout).index(),
-            }),
+            // 平台惯例是按词往后到下一个词的开头时（Windows 的 Ctrl+Delete），连词后面的空白一起删
+            (true, Reach::Word) => {
+                let skips = crate::system::conventions().word_forward_skips_spaces;
+                match motion::after_spaces(text, local).filter(|_| skips) {
+                    Some(start) => start,
+                    None => {
+                        let end = segmentation::next_word_end(text, local).unwrap_or_else(|| match &para.flow {
+                            Some(flow) => flow.next_logical_word(text, local),
+                            None => cursor.next_logical_word(layout).index(),
+                        });
+                        motion::after_spaces(text, end).filter(|_| skips).unwrap_or(end)
+                    }
+                }
+            }
             (false, Reach::Line) => base + motion::line_start(layout, cursor).index(),
             (true, Reach::Line) => base + motion::line_end(layout, cursor).index(),
         };

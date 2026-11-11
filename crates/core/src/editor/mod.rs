@@ -19,7 +19,7 @@ use scene::{Color, Quad};
 
 use crate::geometry::Affine;
 use crate::event::KeyEvent;
-use crate::input::{Key, NamedKey};
+use crate::input::{Key, Modifiers, NamedKey};
 use crate::geometry::Rect;
 use crate::system::clipboard;
 use crate::text::{Ink, TextAlign, TextBlock, TextStyle, TextSystem};
@@ -648,6 +648,27 @@ impl EditorBlock {
             self.wake(now);
             return outcome;
         }
+        // Windows、Linux 的老习惯：Ctrl+Insert 复制、Shift+Insert 粘贴、Shift+Delete 剪切
+        if conventions.accepts_insert_for_clipboard {
+            let (insert, delete) = (key == &Key::Named(NamedKey::Insert), key == &Key::Named(NamedKey::Delete));
+            if insert && mods == Modifiers::CONTROL {
+                self.copy();
+                self.wake(now);
+                return outcome;
+            }
+            if (insert || delete) && mods == Modifiers::SHIFT {
+                if insert {
+                    match self.paste(text, now) {
+                        Some(changed) => outcome.changed = changed,
+                        None => outcome.handled = false,
+                    }
+                } else {
+                    outcome.changed = self.cut(text, range, now);
+                }
+                self.wake(now);
+                return outcome;
+            }
+        }
         match key {
             Key::Named(NamedKey::Backspace) => {
                 let reach = if edge { Reach::Line } else if word { Reach::Word } else { Reach::Char };
@@ -692,17 +713,10 @@ impl EditorBlock {
                 "c" => {
                     self.copy();
                 }
-                "x" => {
-                    if self.copy() {
-                        outcome.changed = self.edit(text, range, "", Kind::Other, now);
-                    }
-                }
+                "x" => outcome.changed = self.cut(text, range, now),
                 // 剪贴板里没有文字（比如只有图片）：不算处理了，按键接着冒泡，外面的 `on_key_down` 可以自己读图片
-                "v" => match clipboard::read_text() {
-                    Some(pasted) => {
-                        let pasted = clean(&pasted, self.multiline);
-                        outcome.changed = self.insert(text, &pasted, Kind::Other, now);
-                    }
+                "v" => match self.paste(text, now) {
+                    Some(changed) => outcome.changed = changed,
                     None => outcome.handled = false,
                 },
                 "z" if shift => outcome.changed = self.redo(text),
@@ -859,7 +873,8 @@ impl EditorBlock {
     }
 
     /// 输入法候选框应该避开的区域（布局坐标）：预编辑文字（没有时是插入点）左右各留出约三个字，
-    /// 打字时候选框不会跟着一个字一个字地跳
+    /// 打字时候选框不会跟着一个字一个字地跳。平台的输入法把区域的左上角当成候选框的位置时（Windows，
+    /// [`crate::Conventions::pads_ime_area`]）不留：候选框对齐组的字的开头
     pub fn ime_area(&self) -> Rect {
         let caret = self.doc.caret_rect(self.doc.selection.focus, 0.0);
         let mut area = caret;
@@ -873,7 +888,8 @@ impl EditorBlock {
                 }
             });
         }
-        let inflate = (3.0 * 0.6 * self.doc.style().size) as f64;
+        let pad = if crate::system::conventions().pads_ime_area { 3.0 * 0.6 * self.doc.style().size } else { 0.0 };
+        let inflate = f64::from(pad);
         let x0 = (area.x0 - inflate).max(0.0);
         let x1 = area.x1 + inflate;
         Rect {
@@ -1038,6 +1054,18 @@ impl EditorBlock {
         }
         clipboard::write_text(self.doc.slice(range));
         true
+    }
+
+    /// 剪切：选中的文字放进剪贴板、删掉。返回内容变了没有（没有选中、密码时什么都不做）
+    fn cut(&mut self, text: &mut TextSystem, range: Range<usize>, now: f64) -> bool {
+        self.copy() && self.edit(text, range, "", Kind::Other, now)
+    }
+
+    /// 粘贴剪贴板里的文字（多余的换行按单行、多行清理），返回内容变了没有；剪贴板里没有文字时是 `None`
+    fn paste(&mut self, text: &mut TextSystem, now: f64) -> Option<bool> {
+        let pasted = clipboard::read_text()?;
+        let pasted = clean(&pasted, self.multiline);
+        Some(self.insert(text, &pasted, Kind::Other, now))
     }
 
     // ---- 绘制 ----

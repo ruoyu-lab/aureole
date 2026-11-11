@@ -10,7 +10,7 @@
 //! Linux：托盘走 D-Bus 上的 StatusNotifierItem，没有菜单栏）。没有原生菜单栏的平台上菜单项的快捷键登记成全应用的快捷键，照样起作用。
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -319,10 +319,20 @@ fn install_menu_bar(menu: Menu, app_name: &str, main: &MainThreadSender) -> bool
         return false;
     };
     let mut bindings = Vec::new();
-    let model = MenuModel { entries: model(menu.entries, &mut bindings) };
-    match service.set_menu_bar(model, app_name, forward(main)) {
+    let entries = model(menu.entries, &mut bindings);
+    // Windows 的菜单栏长在窗口里，系统只翻译落在挂着它的窗口里的快捷键：没挂菜单栏的窗口（隐藏了标题栏、无边框）里
+    // 照样要起作用，另外登记成全应用的快捷键（挂着菜单栏的窗口里按键先被系统翻译掉，不会触发两次）
+    let shortcuts = if cfg!(target_os = "windows") { shortcuts_of(&entries) } else { Vec::new() };
+    match service.set_menu_bar(MenuModel { entries }, app_name, forward(main)) {
         Ok(()) => {
             bind(bindings, move |id, update| service.update_item(id, update));
+            for (chord, id) in shortcuts {
+                aureole_core::shortcut(&chord, move || {
+                    if !is_disabled(id) {
+                        dispatch_menu(id);
+                    }
+                });
+            }
             true
         }
         Err(error) => {
@@ -392,6 +402,39 @@ enum Binding {
     Checked(MenuItemId, Signal<bool>),
 }
 
+thread_local! {
+    /// 此刻禁用着的菜单项（快捷键另外登记成全应用的快捷键时，按下前看一眼）
+    static DISABLED: RefCell<HashSet<MenuItemId>> = RefCell::default();
+}
+
+fn set_disabled(id: MenuItemId, disabled: bool) {
+    DISABLED.with(|d| {
+        let mut d = d.borrow_mut();
+        if disabled {
+            d.insert(id);
+        } else {
+            d.remove(&id);
+        }
+    });
+}
+
+fn is_disabled(id: MenuItemId) -> bool {
+    DISABLED.with(|d| d.borrow().contains(&id))
+}
+
+/// 菜单模型里带快捷键的菜单项：快捷键的写法和编号
+fn shortcuts_of(entries: &[MenuEntry]) -> Vec<(String, MenuItemId)> {
+    let mut out = Vec::new();
+    for entry in entries {
+        match entry {
+            MenuEntry::Separator => {}
+            MenuEntry::Submenu(submenu) => out.extend(shortcuts_of(&submenu.entries)),
+            MenuEntry::Item(item) => out.extend(item.shortcut.clone().map(|chord| (chord, item.id))),
+        }
+    }
+    out
+}
+
 /// 每个菜单项一个编号（菜单栏和托盘共用，不重）
 fn next_id() -> MenuItemId {
     thread_local! {
@@ -430,6 +473,7 @@ fn model(entries: Vec<Entry>, bindings: &mut Vec<Binding>) -> Vec<MenuEntry> {
                         disabled
                     }
                 };
+                set_disabled(id, disabled);
                 let checked = item.checked.map(|signal| {
                     bindings.push(Binding::Checked(id, signal));
                     reactive::untracked(|| signal.get())
@@ -449,7 +493,11 @@ fn bind(bindings: Vec<Binding>, update: impl Fn(MenuItemId, MenuItemUpdate) -> R
         let change = move |id, change: MenuItemUpdate| report("改菜单项", update(id, change));
         match binding {
             Binding::Text(id, f) => Effect::new(move || change(id, MenuItemUpdate { text: Some(f()), ..Default::default() })),
-            Binding::Disabled(id, f) => Effect::new(move || change(id, MenuItemUpdate { disabled: Some(f()), ..Default::default() })),
+            Binding::Disabled(id, f) => Effect::new(move || {
+                let disabled = f();
+                set_disabled(id, disabled);
+                change(id, MenuItemUpdate { disabled: Some(disabled), ..Default::default() })
+            }),
             Binding::Checked(id, signal) => {
                 Effect::new(move || change(id, MenuItemUpdate { checked: Some(signal.get()), ..Default::default() }))
             }

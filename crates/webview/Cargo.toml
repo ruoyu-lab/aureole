@@ -1,0 +1,70 @@
+[package]
+name = "aureole-webview"
+version = "0.0.1-beta.3"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "Aureole 的网页视图：内嵌 CEF 内核，网页画进纹理，当成普通元素合成（试验性）"
+repository = "https://github.com/ruoyu-lab/aureole"
+keywords = ["gui", "webview", "cef", "desktop"]
+categories = ["gui"]
+readme = "README.md"
+
+# docs.rs 上没有网络、没有 cmake：不下载内核，不编包装层，只生成文档
+[package.metadata.docs.rs]
+features = ["cef/dox"]
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+# 单独的工作区：CEF 内核在编译时下载（约 500 MB），包装层要 cmake 和 Ninja 编 C++，不跟着框架的工作区一起编。
+# 发布到 crates.io 时路径依赖换成版本号，所以两样都写；版本跟着框架的版本走
+[workspace]
+
+[dependencies]
+# 读屏：页面的无障碍节点交给框架（和 aureole-core 用的同一版）
+accesskit = "0.25"
+aureole = { path = "../aureole", version = "0.0.1-beta.3" }
+aureole-core = { path = "../core", version = "0.0.1-beta.3" }
+aureole-render = { path = "../render", version = "0.0.1-beta.3" }
+aureole-runtime = { path = "../runtime", version = "0.0.1-beta.3" }
+cef = { version = "156.4", default-features = false, features = ["accelerated_osr"] }
+wgpu = "30"
+tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-foundation = "0.3.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSApplication", "NSResponder", "NSAlert", "NSWindow", "NSView", "NSControl", "NSTextField", "NSRunningApplication", "NSGraphics"] }
+# 页面对话框挂在窗口上（表单式）时关掉的回调
+block2 = "0.6"
+# 子进程进沙箱：加载内核框架里的沙箱库
+libloading = "0.9"
+# 离屏绘制的快路径：CEF 的 IOSurface 直接包成 Metal 纹理
+objc2-core-foundation = "0.3"
+objc2-io-surface = "0.3.2"
+objc2-metal = { version = "0.3", default-features = false, features = ["std", "MTLDevice", "MTLTexture", "MTLResource", "MTLPixelFormat", "MTLTypes", "objc2-io-surface"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# 离屏绘制的快路径：CEF 的 D3D11 共享纹理在框架的 D3D12 设备上直接打开（和 wgpu 用同一版 windows）
+windows = { version = "0.62", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Globalization", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+# 例子把日志打到标准错误
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }
+
+[[bin]]
+name = "aureole-webview-helper"
+path = "src/bin/helper.rs"
+
+[lints.rust]
+missing_docs = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
+too_many_arguments = "allow"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"

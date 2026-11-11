@@ -1,4 +1,5 @@
-//! 帧时钟里不碰系统的部分：计时器的节拍、刷新间隔的估计、表面帧回调的状态机。
+//! 帧时钟里不碰系统的部分：计时器的节拍、刷新间隔的估计、表面帧回调的状态机，
+//! 等刷新的源按帧率上限隔几次刷新交一帧、合成器时钟的返回值和节拍的对齐。
 //! 时间都由调用方传进来，所以在任何平台上都能单元测试（无头后端的虚拟时间也走这里）。
 
 use std::time::{Duration, Instant};
@@ -296,7 +297,116 @@ impl CallbackPacing {
     }
 }
 
-/// `DCompositionWaitForCompositorClock` 的返回值是什么意思（`count` 是传进去的句柄数）
+/// 刷新几次交一帧：两帧之间至少隔 `min_gap`（帧率上限的倒数），而且只能隔整数个刷新——隔 1.4 个刷新的话
+/// 有的帧隔一个、有的隔两个，看着一顿一顿。上限不低于刷新率时每次刷新都交；只低一点（5% 以内）也算每次都交
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn refresh_divisor(period: Duration, min_gap: Duration) -> u32 {
+    let ratio = min_gap.as_secs_f64() / period.as_secs_f64().max(1e-6);
+    (ratio - 0.05).ceil().clamp(1.0, 1000.0) as u32
+}
+
+/// 等刷新的源每次刷新都醒，按帧率上限隔几次刷新交一帧（[`refresh_divisor`]）。
+///
+/// 数的是刷新：两帧的目标时刻之差除以刷新周期、四舍五入，不按醒来的时刻和上限比——线程醒得早一点晚一点
+/// （半个周期以内）不会让一帧被错丢。合成器时钟给的目标时刻对齐在合成器的节拍上，根本不抖
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct Decimation {
+    /// 上一次交的那一帧的目标时刻
+    last: Option<Duration>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Decimation {
+    /// 节拍断了（暂停过、换了源）：下一帧照交
+    pub(crate) fn reset(&mut self) {
+        self.last = None;
+    }
+
+    /// 目标时刻是 `target` 的这一帧交不交：离上一次交的够不够整数个刷新。时间往回走了（换了源、时钟跳了）当成重新开始
+    pub(crate) fn admit(&mut self, target: Duration, period: Duration, min_gap: Duration) -> bool {
+        if let Some(last) = self.last
+            && target >= last
+        {
+            let refreshes = ((target - last).as_secs_f64() / period.as_secs_f64().max(1e-6)).round();
+            if refreshes < f64::from(refresh_divisor(period, min_gap)) {
+                return false;
+            }
+        }
+        self.last = Some(target);
+        true
+    }
+}
+
+/// `WaitForVBlank` 没真的等：显示器睡着、远程桌面、基本显示适配器和某些虚拟显示器上它马上返回。
+/// 时钟线程交完一帧立刻再等，正常时总要等将近一个刷新，不到 1 毫秒（刷新特别快时是四分之一个刷新）就返回只能是没等
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn vblank_returned_early(waited: Duration, interval: Duration) -> bool {
+    waited < (interval / 4).min(Duration::from_millis(1))
+}
+
+/// 两个刷新率（赫兹）算不算一样：差在 2% 以内，或者不到 1Hz（系统报告显示器的刷新率只给整数，59.94Hz 报成 59）
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn rates_match(compositor_hz: f64, monitor_hz: f64) -> bool {
+    (compositor_hz - monitor_hz).abs() <= (compositor_hz * 0.02).max(1.0)
+}
+
+/// 合成器时钟的窗口按哪个节拍出帧
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) enum ClockChoice {
+    /// 合成器时钟
+    #[default]
+    Compositor,
+    /// 窗口所在显示器的垂直消隐：合成器时钟跟着另一个刷新率不同的显示器
+    WindowMonitor,
+}
+
+/// 显示器的刷新率不一样时，合成器时钟只跟其中一个（这台机器上：主显示器 160Hz、副显示器 165Hz，它按 165Hz 走）。
+/// 窗口在另一个显示器上的话每秒多出几帧、看着一顿一顿，这时改等窗口所在显示器的垂直消隐；对上了（窗口挪过去了、
+/// 合成器换了跟的显示器）换回合成器时钟。
+///
+/// 每隔一会儿看一次（[`observe`](Self::observe)）：连续 [`SUSTAIN`](Self::SUSTAIN) 次都说该换才换，偶尔一次对不上不换；
+/// 哪一边读不到时不做决定
+#[derive(Clone, Debug, Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct RefreshFollow {
+    /// 一开始用合成器时钟
+    choice: ClockChoice,
+    /// 连续几次说该换
+    streak: u32,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl RefreshFollow {
+    pub(crate) const SUSTAIN: u32 = 4;
+
+    pub(crate) fn choice(&self) -> ClockChoice {
+        self.choice
+    }
+
+    /// 又看了一次：合成器时钟的帧周期、窗口所在显示器的刷新率（赫兹）。返回现在该用哪个
+    pub(crate) fn observe(&mut self, compositor_period: Option<Duration>, monitor_hz: Option<f64>) -> ClockChoice {
+        let (Some(period), Some(monitor_hz)) = (compositor_period.filter(|p| !p.is_zero()), monitor_hz) else {
+            self.streak = 0;
+            return self.choice;
+        };
+        let wanted = if rates_match(1.0 / period.as_secs_f64(), monitor_hz) { ClockChoice::Compositor } else { ClockChoice::WindowMonitor };
+        if wanted == self.choice {
+            self.streak = 0;
+        } else {
+            self.streak += 1;
+            if self.streak >= Self::SUSTAIN {
+                self.choice = wanted;
+                self.streak = 0;
+            }
+        }
+        self.choice
+    }
+}
+
+/// `DCompositionWaitForCompositorClock` 的返回值是什么意思（`count` 是传进去的句柄数）。返回的是 NTSTATUS，
+/// 成功、超时的值和 `WaitForMultipleObjects` 的一样
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) enum CompositorWait {
@@ -306,38 +416,59 @@ pub(crate) enum CompositorWait {
     Handle(u32),
     /// 到了超时还没走
     Timeout,
+    /// 显示器关着（没人动、到了关屏的时间，或者远程桌面关了本机的屏幕）：不等就返回。显示器亮了又会走，不算坏了
+    Occluded,
     /// 出错
     Failed,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn compositor_wait(code: u32, count: u32) -> CompositorWait {
-    /// `WAIT_TIMEOUT`
+    /// `STATUS_TIMEOUT`（就是 `WAIT_TIMEOUT`）
     const TIMEOUT: u32 = 0x102;
+    /// `STATUS_GRAPHICS_PRESENT_OCCLUDED`
+    const OCCLUDED: u32 = 0xC01E_0006;
     match code {
-        // WAIT_OBJECT_0（0）加句柄数：时钟走了；比句柄数小：那个句柄有信号
+        // STATUS_WAIT_0（0）加句柄数：时钟走了；比句柄数小：那个句柄有信号
         code if code == count => CompositorWait::Tick,
         code if code < count => CompositorWait::Handle(code),
         TIMEOUT => CompositorWait::Timeout,
+        OCCLUDED => CompositorWait::Occluded,
         _ => CompositorWait::Failed,
     }
 }
 
-/// 合成器时钟走了一格时的帧时间。`now` 和统计里的时间都是性能计数器的读数；
-/// 统计读不到、目标时间已经过去、或者远得不合理（统计是旧的）时按帧周期（再没有就按估计的间隔）往后推
+/// 合成器的节拍：统计里某一帧的目标上屏时刻和帧周期（性能计数器的读数）。之后的刷新落在 `target + k × period` 上
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn compositor_frame(now: u64, statistics: Option<(u64, u64)>, frequency: u64, fallback: Duration) -> super::FrameTime {
+pub(crate) struct CompositorGrid {
+    pub target: u64,
+    pub period: u64,
+}
+
+/// 合成器时钟走了一格时的帧时间和刷新周期。`now` 和节拍都是性能计数器的读数。
+///
+/// 有节拍时目标时刻对齐到节拍上：取节拍上第一个不早于"此刻加四分之一个周期"的点（醒来晚一点也还是下一次刷新），
+/// `timestamp` 是它前一个点（上一次刷新），所以 [`FrameTime::interval`](super::FrameTime::interval) 正好是合成器的帧周期。
+/// 节拍读不到、周期不合理、或者离此刻超过一秒（统计是旧的）时，从此刻起按 `fallback`（量到的间隔）往后推
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn compositor_frame(now: u64, grid: Option<CompositorGrid>, frequency: u64, fallback: Duration) -> (super::FrameTime, Duration) {
     let seconds = |ticks: u64| super::ticks_to_seconds(ticks, frequency);
-    let period = match statistics {
-        Some((_, period)) if period > 0 => seconds(period),
-        _ => fallback.as_secs_f64(),
-    }
-    .clamp(SHORTEST.as_secs_f64(), LONGEST.as_secs_f64());
-    let timestamp = seconds(now);
-    let target = match statistics {
-        Some((target, _)) if target > now => seconds(target),
-        _ => timestamp + period,
+    let sane = |g: &CompositorGrid| {
+        let period = Duration::from_secs_f64(seconds(g.period));
+        (SHORTEST..=LONGEST).contains(&period) && g.target.abs_diff(now) <= frequency
     };
-    let target = if target - timestamp > period * 4.0 { timestamp + period } else { target };
-    super::FrameTime::from_seconds(timestamp, target)
+    let Some(grid) = grid.filter(sane) else {
+        let period = fallback.clamp(SHORTEST, LONGEST);
+        let timestamp = seconds(now);
+        return (super::FrameTime::from_seconds(timestamp, timestamp + period.as_secs_f64()), period);
+    };
+    let period = i128::from(grid.period);
+    let offset = i128::from(now) + period / 4 - i128::from(grid.target);
+    // 向上取整的除法：节拍上第一个不早于 now + period / 4 的点
+    let steps = offset.div_euclid(period) + i128::from(offset.rem_euclid(period) > 0);
+    let target = i128::from(grid.target) + steps * period;
+    let ticks = |t: i128| u64::try_from(t).unwrap_or(0);
+    let frame = super::FrameTime::from_seconds(seconds(ticks(target - period)), seconds(ticks(target)));
+    (frame, Duration::from_secs_f64(seconds(grid.period)))
 }

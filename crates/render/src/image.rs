@@ -40,6 +40,8 @@ pub(crate) struct Images {
     default: wgpu::BindGroup,
     /// 单独的纹理，各自一个绑定组（图集 + 这张纹理 + 它的参数）
     textures: HashMap<u32, Single>,
+    /// 外部纹理（`external.rs`），各自一个绑定组；纹理归登记它的代码，不记显存账
+    externals: HashMap<u32, (wgpu::Texture, wgpu::BindGroup)>,
     ledger: Arc<Ledger>,
 }
 
@@ -110,7 +112,7 @@ impl Images {
         // 新建的缓冲区是 0：峰值 0，8 位纹理
         let plain = params_buffer(device, ledger);
         let default = bind_group(device, &layout, &sampler, &atlas, &placeholder, &plain);
-        Self { layout, sampler, atlas, placeholder, plain, default, textures: HashMap::new(), ledger: ledger.clone() }
+        Self { layout, sampler, atlas, placeholder, plain, default, textures: HashMap::new(), externals: HashMap::new(), ledger: ledger.clone() }
     }
 
     pub fn layout(&self) -> &wgpu::BindGroupLayout {
@@ -124,7 +126,21 @@ impl Images {
 
     /// 单独纹理的绑定组；还没建（或已释放）时为 `None`
     pub fn texture_group(&self, id: u32) -> Option<&wgpu::BindGroup> {
-        self.textures.get(&id).map(|single| &single.group)
+        match self.textures.get(&id) {
+            Some(single) => Some(&single.group),
+            None => self.externals.get(&id).map(|(_, group)| group),
+        }
+    }
+
+    /// 外部纹理 `id` 换成 `texture`：建它的绑定组
+    pub fn set_external(&mut self, device: &wgpu::Device, id: u32, texture: &wgpu::Texture) {
+        let group = bind_group(device, &self.layout, &self.sampler, &self.atlas, texture, &self.plain);
+        self.externals.insert(id, (texture.clone(), group));
+    }
+
+    /// 外部纹理 `id` 撤销了
+    pub fn remove_external(&mut self, id: u32) {
+        self.externals.remove(&id);
     }
 
     pub fn apply(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, update: &ImageUpdate) {
@@ -136,6 +152,9 @@ impl Images {
                 for single in self.textures.values_mut() {
                     let params = single.params.as_ref().unwrap_or(&self.plain);
                     single.group = bind_group(device, &self.layout, &self.sampler, &self.atlas, &single.texture, params);
+                }
+                for (texture, group) in self.externals.values_mut() {
+                    *group = bind_group(device, &self.layout, &self.sampler, &self.atlas, texture, &self.plain);
                 }
             }
             ImageUpdate::Atlas { x, y, image } => {

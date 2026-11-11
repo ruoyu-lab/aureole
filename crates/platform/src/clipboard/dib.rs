@@ -54,6 +54,34 @@ pub fn encode(image: &RgbaImage) -> Vec<u8> {
     out
 }
 
+/// 写成老的 `BITMAPINFOHEADER` 加像素（`CF_DIB`）：24 位、从下往上、每行补到 4 字节，透明的地方叠在白底上。
+/// 不认透明度的老程序读它：透明处是白的，不是黑的；认透明度的读 `CF_DIBV5` 或 PNG
+pub fn encode_opaque(image: &RgbaImage) -> Vec<u8> {
+    let (width, height) = (image.width as usize, image.height as usize);
+    let stride = (width * 3).div_ceil(4) * 4;
+    let mut out = Vec::with_capacity(INFO_HEADER + stride * height);
+    out.extend_from_slice(&(INFO_HEADER as u32).to_le_bytes());
+    out.extend_from_slice(&(image.width as i32).to_le_bytes());
+    out.extend_from_slice(&(image.height as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // 平面数
+    out.extend_from_slice(&24u16.to_le_bytes()); // 每像素位数
+    out.extend_from_slice(&BI_RGB.to_le_bytes());
+    out.extend_from_slice(&((stride * height) as u32).to_le_bytes());
+    out.extend_from_slice(&[0; 16]); // 分辨率、调色板
+    debug_assert_eq!(out.len(), INFO_HEADER);
+    // 叠在白底上：c·a + 255·(1 − a)
+    let over_white = |c: u8, a: u8| ((u32::from(c) * u32::from(a) + 255 * (255 - u32::from(a)) + 127) / 255) as u8;
+    if width > 0 {
+        for row in image.rgba.chunks_exact(width * 4).rev() {
+            for [r, g, b, a] in row.as_chunks::<4>().0 {
+                out.extend_from_slice(&[over_white(*b, *a), over_white(*g, *a), over_white(*r, *a)]);
+            }
+            out.extend(std::iter::repeat_n(0, stride - width * 3));
+        }
+    }
+    out
+}
+
 /// 读 `CF_DIB`、`CF_DIBV5`：头部（`BITMAPINFOHEADER` 和它后来的几个版本）紧跟着像素。认 24 位、32 位；
 /// 别的位深（带调色板的、16 位）是 `None`
 pub fn decode(dib: &[u8]) -> Option<RgbaImage> {
@@ -146,15 +174,21 @@ pub fn encode_file_list(paths: &[Vec<u16>]) -> Vec<u8> {
     out
 }
 
-/// 读 `CF_HDROP` 的内容：每个路径一串 UTF-16（窄字符的老格式按单字节展开）
+/// 读 `CF_HDROP` 的内容：每个路径一串 UTF-16（窄字符的老格式按单字节展开，见 [`decode_file_list_with`]）
 pub fn decode_file_list(bytes: &[u8]) -> Vec<Vec<u16>> {
+    decode_file_list_with(bytes, |path| path.iter().map(|&byte| u16::from(byte)).collect())
+}
+
+/// 读 `CF_HDROP` 的内容，窄字符的老格式（系统的代码页，中文系统上是 GBK）每个路径交给 `narrow` 换成 UTF-16
+pub fn decode_file_list_with(bytes: &[u8], narrow: impl Fn(&[u8]) -> Vec<u16>) -> Vec<Vec<u16>> {
     let Some(at) = u32_at(bytes, 0).map(|at| at as usize) else { return Vec::new() };
     let wide = u32_at(bytes, 16).is_some_and(|wide| wide != 0);
     let Some(list) = bytes.get(at..) else { return Vec::new() };
-    let units: Vec<u16> = if wide {
-        list.as_chunks::<2>().0.iter().map(|unit| u16::from_le_bytes(*unit)).collect()
+    if wide {
+        let units: Vec<u16> = list.as_chunks::<2>().0.iter().map(|unit| u16::from_le_bytes(*unit)).collect();
+        units.split(|unit| *unit == 0).take_while(|path| !path.is_empty()).map(<[u16]>::to_vec).collect()
     } else {
-        list.iter().map(|&byte| u16::from(byte)).collect()
-    };
-    units.split(|unit| *unit == 0).take_while(|path| !path.is_empty()).map(<[u16]>::to_vec).collect()
+        // 双字节的代码页里 0 不会出现在字的第二个字节，按 0 切开是对的
+        list.split(|byte| *byte == 0).take_while(|path| !path.is_empty()).map(narrow).collect()
+    }
 }

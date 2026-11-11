@@ -8,6 +8,10 @@
 //! - Windows：拖放目标（`IDropTarget`）一个窗口只能登记一个，所以运行时关掉窗口库的文件拖放，全部由这里接；
 //!   文件交给回调，运行时换成和窗口库一样的窗口事件。
 //! - Linux：窗口库只提供文件（X11 的 XDND、Wayland 的数据设备都不开放别的类型），不支持别的内容，照样能拖文件。
+//!
+//! 这个进程自己拖出去的（[`crate::begin_drag_out`] 开始、还没结束的会话）经过自己的窗口时，种类里标着 [`ExternalDataKinds::own`]：
+//! 内容是空的也交给回调（应用自己的窗口之间拖元素，真正的数据留在进程里）。这时 macOS 上的文件也不转给窗口库，
+//! 和 Windows 一样交给回调。
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -30,13 +34,40 @@ pub struct ExternalDataKinds {
     pub image: bool,
     /// 文件
     pub files: bool,
+    /// 带格式的文字（RTF）
+    pub rich_text: bool,
+    /// 应用登记过的自己定的格式（[`accept_custom_format`]）里至少有一种
+    pub custom: bool,
+    /// 是这个进程自己拖出去的（[`crate::begin_drag_out`] 开始、还没结束的会话；同一时刻只有一次拖放，所以就是它）
+    pub own: bool,
 }
 
 impl ExternalDataKinds {
-    /// 一种都没有
+    /// 一种都没有，也不是自己拖出去的
     pub fn is_empty(self) -> bool {
-        !(self.text || self.link || self.image || self.files)
+        !(self.text || self.link || self.image || self.files || self.rich_text || self.custom || self.own)
     }
+}
+
+/// 拖进来时要读的应用自己定的格式，整个进程一份（[`accept_custom_format`]）
+static CUSTOM_FORMATS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 别的程序（或同一个应用的别的窗口、别的实例）拖进来时也读应用自己定的格式 `name`（剪贴板、`DragOut` 的 `custom` 用的那种名字）。
+/// 重复登记不算。macOS 上窗口打开时按登记过的格式告诉系统接受哪些拖放类型：要在打开窗口之前调用
+pub fn accept_custom_format(name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    let mut formats = CUSTOM_FORMATS.lock().unwrap_or_else(|e| e.into_inner());
+    if !formats.iter().any(|known| known == name) {
+        formats.push(name.to_owned());
+    }
+}
+
+/// 登记过的自己定的格式
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn custom_formats() -> Vec<String> {
+    CUSTOM_FORMATS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// 接受的话算什么操作：系统按它显示光标，也告诉拖动的来源
@@ -59,8 +90,12 @@ pub struct ExternalDropData {
     pub link: Option<String>,
     /// 图片
     pub image: Option<RgbaImage>,
-    /// 文件（窗口库自己发文件事件的平台上是空的，见模块说明）
+    /// 文件（窗口库自己发文件事件的平台上、不是自己拖出去的时候是空的，见模块说明）
     pub files: Vec<PathBuf>,
+    /// 带格式的文字（RTF，见 [`crate::clipboard::rtf`]）
+    pub rich_text: Option<Vec<u8>>,
+    /// 登记过的自己定的格式里拖来了的：格式名和原样的字节
+    pub custom: Vec<(String, Vec<u8>)>,
 }
 
 /// 拖放的进展。位置是窗口内容区里的逻辑像素，左上角为原点
@@ -72,7 +107,7 @@ pub enum ExternalDrag {
         kinds: ExternalDataKinds,
         /// 位置
         position: [f32; 2],
-        /// 刚进来时的文件，只有窗口库不管文件的平台（Windows）才有
+        /// 刚进来时的文件，只有窗口库不管文件的时候（Windows，macOS 上自己拖出去的）才有
         entered_files: Vec<PathBuf>,
     },
     /// 离开窗口或取消
@@ -86,8 +121,9 @@ pub enum ExternalDrag {
     },
 }
 
-/// 拖放的回调：在主线程上，从系统的拖放流程里直接调进来。返回接不接受（`None` 不接受，系统显示不能放下的光标）；
-/// [`ExternalDrag::Leave`]、[`ExternalDrag::Drop`] 的返回值不用
+/// 拖放的回调：在主线程上，从系统的拖放流程里直接调进来。[`ExternalDrag::Over`] 返回接不接受（`None` 不接受，
+/// 系统显示不能放下的光标）；[`ExternalDrag::Drop`] 返回真正做了的操作（`None`：没人收下），Windows 把它告诉拖动的来源：
+/// 说"移动"时来源会删掉原来的（文件只交出了路径，应用没自己挪走时要说拷贝）。[`ExternalDrag::Leave`] 的返回值不用
 pub type OnExternalDrag = Rc<dyn Fn(ExternalDrag) -> Option<ExternalDropEffect>>;
 
 /// 回调里 panic 不能穿过系统的拖放流程：接住，记一条错误，当成不接受

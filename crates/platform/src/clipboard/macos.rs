@@ -136,23 +136,29 @@ fn new_bitmap(width: isize, height: isize, format: NSBitmapFormat) -> Option<Ret
     rep.bitmapImageRepByRetaggingWithColorSpace(&NSColorSpace::sRGBColorSpace())
 }
 
-/// 同一张图的 PNG、TIFF 数据
-fn encode_image(image: &RgbaImage) -> Result<(Retained<NSData>, Retained<NSData>), PlatformError> {
-    if !image.is_valid() {
-        return Err(PlatformError::System(format!("图片的像素数不对：{}×{}，{} 字节", image.width, image.height, image.rgba.len()).into()));
-    }
-    let failed = || PlatformError::System("系统没能把图片编码出来".into());
-    let rep = new_bitmap(image.width as isize, image.height as isize, NSBitmapFormat::AlphaNonpremultiplied).ok_or_else(failed)?;
+/// 这张图（像素数要对）的位图，sRGB、不预乘；建不出来时是 `None`
+pub(crate) fn bitmap_of(image: &RgbaImage) -> Option<Retained<NSBitmapImageRep>> {
+    let rep = new_bitmap(image.width as isize, image.height as isize, NSBitmapFormat::AlphaNonpremultiplied)?;
     let stride = rep.bytesPerRow() as usize;
     let data = rep.bitmapData();
     let width = image.width as usize;
-    if data.is_null() || stride < width * 4 {
-        return Err(failed());
+    if data.is_null() || stride < width * 4 || !image.is_valid() {
+        return None;
     }
     for (y, row) in image.rgba.chunks_exact(width * 4).enumerate() {
         // SAFETY: 位图是上面建的，有 `bytesPerRow × 高` 个字节，`y` 小于高，一行写 `width × 4 ≤ bytesPerRow` 个字节；`row` 不和它重叠
         unsafe { std::ptr::copy_nonoverlapping(row.as_ptr(), data.add(y * stride), row.len()) };
     }
+    Some(rep)
+}
+
+/// 同一张图的 PNG、TIFF 数据
+pub(crate) fn encode_image(image: &RgbaImage) -> Result<(Retained<NSData>, Retained<NSData>), PlatformError> {
+    if !image.is_valid() {
+        return Err(PlatformError::System(format!("图片的像素数不对：{}×{}，{} 字节", image.width, image.height, image.rgba.len()).into()));
+    }
+    let failed = || PlatformError::System("系统没能把图片编码出来".into());
+    let rep = bitmap_of(image).ok_or_else(failed)?;
     // SAFETY: 空字典：没有要设的属性
     let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }.ok_or_else(failed)?;
     let tiff = rep.TIFFRepresentation().ok_or_else(failed)?;
@@ -197,6 +203,11 @@ pub fn read_rich_text() -> Option<Vec<u8>> {
     general().dataForType(unsafe { NSPasteboardTypeRTF }).map(|data| data.to_vec())
 }
 
+/// 剪贴板上应用自己定的格式（格式名就是剪贴板的类型），原样的字节
+pub fn read_custom(format: &str) -> Option<Vec<u8>> {
+    general().dataForType(&NSString::from_str(format)).map(|data| data.to_vec())
+}
+
 /// 剪贴板上的图片
 pub fn read_image() -> Option<RgbaImage> {
     image_on(&general())
@@ -214,7 +225,7 @@ pub fn write(content: &ClipboardContent) -> Result<(), PlatformError> {
     let files = content.files.iter().map(|path| file_url(path)).collect::<Result<Vec<_>, _>>()?;
     let pasteboard = general();
     pasteboard.clearContents();
-    if content.formats().is_empty() {
+    if content.is_empty() {
         return Ok(());
     }
     // SAFETY: 类型常量是 AppKit 导出的不可变字符串，链接后一直有效
@@ -230,6 +241,9 @@ pub fn write(content: &ClipboardContent) -> Result<(), PlatformError> {
     if let Some((png_data, tiff_data)) = &image {
         first.setData_forType(png_data, png);
         first.setData_forType(tiff_data, tiff);
+    }
+    for (format, bytes) in &content.custom {
+        first.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(format));
     }
     let mut files = files.into_iter();
     if let Some(url) = files.next() {

@@ -143,6 +143,8 @@ impl PlatformBackend for NativeBackend {
 
     fn capabilities(&self) -> Capabilities {
         let macos = cfg!(target_os = "macos");
+        // macOS、Windows 都有的：拖到应用外面、指针位置、低电量（省电模式）
+        let macos_or_windows = cfg!(any(target_os = "macos", target_os = "windows"));
         let desktop = cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux"));
         Capabilities {
             frame_clock: self.best_frame_clock(),
@@ -153,25 +155,31 @@ impl PlatformBackend for NativeBackend {
             supports_clipboard_files: desktop,
             supports_clipboard_rich_text: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_clipboard_multiple_formats: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_clipboard_custom: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_file_dialog: desktop,
             supports_notification: system::imp::notification_available(),
             supports_notification_actions: system::imp::notification_available(),
-            supports_drag_out: macos,
+            supports_drag_out: macos_or_windows,
             supports_external_drop: cfg!(any(target_os = "macos", target_os = "windows")),
-            supports_pointer_position: macos,
+            supports_pointer_position: macos_or_windows,
             supports_display_color: macos,
             supports_open_events: crate::open::imp::delivers_events(),
             supports_settings_watch: cfg!(any(target_os = "windows", target_os = "linux")),
-            supports_low_power_detection: macos,
+            supports_low_power_detection: macos_or_windows,
             supports_single_instance: cfg!(any(unix, windows)),
             supports_hidden_title_bar: desktop,
             supports_title_bar_controls: macos,
             supports_snap_layouts: snap_layouts_available(),
             supports_window_backdrop: macos || backdrop_available(),
+            supports_print: macos_or_windows,
         }
     }
 
+    /// Windows 上滚轮、双击、拖动的那几项跟着此刻的系统设置
     fn conventions(&self) -> &Conventions {
+        #[cfg(target_os = "windows")]
+        return system::imp::conventions();
+        #[cfg(not(target_os = "windows"))]
         Conventions::current()
     }
 
@@ -243,7 +251,15 @@ impl PlatformBackend for NativeBackend {
 
 impl WindowService for NativeBackend {
     fn display_color(&self, window: &dyn HasWindowHandle) -> Option<DisplayColor> {
+        #[cfg(target_os = "windows")]
+        return crate::display::display_color(window);
+        #[cfg(not(target_os = "windows"))]
         imp::display_color(window)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn display_adapter(&self, window: &dyn HasWindowHandle) -> Option<crate::DisplayAdapter> {
+        crate::display::display_adapter(window)
     }
 
     fn pointer_position(&self, window: &dyn HasWindowHandle) -> Option<[f32; 2]> {
@@ -286,7 +302,7 @@ impl WindowService for NativeBackend {
     fn bring_to_front(&self, window: &dyn HasWindowHandle) -> Result<(), PlatformError> {
         if imp::bring_to_front(window) {
             Ok(())
-        } else if cfg!(target_os = "macos") {
+        } else if cfg!(any(target_os = "macos", target_os = "windows")) {
             Err(PlatformError::System("不在主线程，或者不是这个进程的窗口".into()))
         } else {
             Err(PlatformError::Unsupported("这个平台由窗口库自己把窗口带到前面".into()))
@@ -296,32 +312,32 @@ impl WindowService for NativeBackend {
     fn begin_drag_out(
         &self,
         window: &dyn HasWindowHandle,
-        files: &[PathBuf],
-        text: Option<&str>,
+        content: &ClipboardContent,
         at: [f32; 2],
         on_end: Box<dyn FnOnce(bool)>,
     ) -> Result<(), PlatformError> {
-        #[cfg(target_os = "macos")]
+        // macOS 是 AppKit 的拖动会话，Windows 是外壳的 `SHDoDragDrop`（在事件回调外面开始），接口一样
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
-            if crate::drag::begin_drag_out(window, files, text, at, on_end) {
+            if crate::drag::begin_drag_out(window, content, at, on_end) {
                 Ok(())
             } else {
-                Err(PlatformError::System("开始不了拖动（不在主线程、没有窗口或者没有东西可拖）".into()))
+                Err(PlatformError::System("开始不了拖动（不在主线程、没有窗口，或者左键已经松开）".into()))
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            let _ = (window, files, text, at, on_end);
+            let _ = (window, content, at, on_end);
             Err(PlatformError::Unsupported("这个平台还没实现拖到应用外面".into()))
         }
     }
 
     fn cancel_drag_out(&self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             crate::drag::cancel_drag_out()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             false
         }
@@ -335,6 +351,11 @@ impl WindowService for NativeBackend {
     #[cfg(target_os = "macos")]
     fn is_secure_input_enabled(&self) -> bool {
         imp::is_secure_input_enabled()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn cancel_ime_composition(&self, window: &dyn HasWindowHandle) -> bool {
+        system::imp::cancel_ime_composition(window)
     }
 
     fn attach_title_bar(&self, window: &dyn HasWindowHandle, options: TitleBarOptions, on_change: OnTitleBarChange) -> Result<(), PlatformError> {
@@ -391,6 +412,11 @@ impl WindowService for NativeBackend {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn hidden_title_bar_frame(&self, window: &dyn HasWindowHandle) -> Option<[u32; 2]> {
+        crate::title_bar::windows::frame_extra(window)
+    }
+
     fn set_maximize_button_area(&self, window: &dyn HasWindowHandle, area: Option<[f32; 4]>) {
         #[cfg(target_os = "windows")]
         crate::title_bar::windows::set_maximize_button_area(window, area);
@@ -407,9 +433,18 @@ impl WindowService for NativeBackend {
         TitleBarAction::Zoom
     }
 
+    /// Windows：菜单栏也换成同样的深浅；老的 Windows 10（1809–1909）的深色外框属性是另一个编号，新的写不上时用老的
     fn set_window_dark(&self, window: &dyn HasWindowHandle, dark: bool, backdrop: WindowMaterial) -> Result<(), PlatformError> {
         #[cfg(target_os = "windows")]
-        return crate::title_bar::windows::set_dark(window, dark, backdrop);
+        {
+            #[cfg(feature = "menus")]
+            crate::menu::menu_bar::set_theme(window, dark);
+            let result = crate::title_bar::windows::set_dark(window, dark, backdrop);
+            if result.is_err() && system::imp::set_dark_frame_legacy(window, dark) {
+                return Ok(());
+            }
+            result
+        }
         #[cfg(not(target_os = "windows"))]
         {
             let _ = (window, dark, backdrop);
@@ -417,11 +452,34 @@ impl WindowService for NativeBackend {
         }
     }
 
+    /// Windows：投递给没有窗口的计时器，由外层的消息循环在窗口库的回调外面执行（拖到应用外面的模态循环要这样开始）
     fn run_outside_event_callback(&self, f: Box<dyn FnOnce()>) {
         #[cfg(target_os = "macos")]
         imp::run_outside_event_callback(f);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        crate::drag::run_outside_event_callback(f);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         f();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn watch_live_resize(&self, window: &dyn HasWindowHandle, on_resize: crate::OnLiveResize) -> Result<(), PlatformError> {
+        crate::live_resize::watch(window, on_resize)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn set_window_background(&self, window: &dyn HasWindowHandle, color: Option<[u8; 3]>) {
+        crate::live_resize::set_background(window, color);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn in_modal_loop(&self) -> bool {
+        crate::modal::in_modal_loop()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn wake_in_modal_loop(&self, after: Option<Duration>, waker: &std::task::Waker) {
+        crate::modal::wake_after(after, waker);
     }
 
     fn set_window_backdrop(&self, window: &dyn HasWindowHandle, backdrop: WindowMaterial) -> Result<(), PlatformError> {
@@ -509,7 +567,10 @@ impl ClipboardService for NativeBackend {
         })
     }
 
+    /// Windows 的换行写成 `\r\n`（Windows 的程序认这个）
     fn write_text(&self, text: &str) -> Result<(), PlatformError> {
+        #[cfg(target_os = "windows")]
+        let text = crate::clipboard::windows::to_crlf(text);
         self.with_clipboard(|clipboard| clipboard.set_text(text))
     }
 
@@ -594,6 +655,16 @@ impl ClipboardService for NativeBackend {
     }
 
     #[cfg(target_os = "macos")]
+    fn read_custom(&self, format: &str) -> Result<Option<Vec<u8>>, PlatformError> {
+        Ok(crate::clipboard::macos::read_custom(format))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn read_custom(&self, format: &str) -> Result<Option<Vec<u8>>, PlatformError> {
+        crate::clipboard::windows::read_custom(format)
+    }
+
+    #[cfg(target_os = "macos")]
     fn write(&self, content: &ClipboardContent) -> Result<(), PlatformError> {
         crate::clipboard::macos::write(content)
     }
@@ -603,9 +674,12 @@ impl ClipboardService for NativeBackend {
         crate::clipboard::windows::write(content)
     }
 
-    /// arboard 一次只放一种：文件、图片、文字里最优先的一种（带格式的文字只剩它的纯文字）
+    /// arboard 一次只放一种：文件、图片、文字里最优先的一种（带格式的文字只剩它的纯文字）；应用自己定的格式放不了
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn write(&self, content: &ClipboardContent) -> Result<(), PlatformError> {
+        if !content.custom.is_empty() {
+            tracing::debug!("这个平台的剪贴板放不了应用自己定的格式，只放别的");
+        }
         if let Some(image) = content.image.as_ref().filter(|image| !image.is_valid()) {
             return Err(PlatformError::System(format!("图片的像素数不对：{}×{}，{} 字节", image.width, image.height, image.rgba.len()).into()));
         }
@@ -639,10 +713,32 @@ impl DialogService for NativeBackend {
     fn alert(&self, title: &str, message: &str) {
         alert::show(title, message);
     }
+
+    // macOS 是 NSPrintPanel / NSPrintOperation，Windows 是 PrintDlgEx / StartDoc（见 print.rs）
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn print_dialog(&self, parent: Option<&dyn HasWindowHandle>, done: crate::PrintDialogDone) {
+        #[cfg(target_os = "macos")]
+        crate::print::macos::print_dialog(parent, done);
+        #[cfg(target_os = "windows")]
+        crate::print::windows::print_dialog(parent, done);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn print(&self, setup: crate::PrintSetup, title: &str, pages: Vec<crate::RgbaImage>, done: crate::PrintDone) {
+        #[cfg(target_os = "macos")]
+        crate::print::macos::print(setup, title, pages, done);
+        #[cfg(target_os = "windows")]
+        crate::print::windows::print(setup, title, pages, done);
+    }
 }
 
 impl ShellService for NativeBackend {
     fn open_url(&self, url: &str) -> Result<(), PlatformError> {
+        // Windows 的外壳什么都打开（本机路径、共享路径上的程序会被直接运行）：不是带协议的网址就不交出去
+        #[cfg(target_os = "windows")]
+        if !system::imp::is_shell_url(url) {
+            return Err(PlatformError::System(format!("不是能交给系统打开的网址（要有协议名，不收本机路径和 file:）：{url}").into()));
+        }
         if system::imp::open_url(url) { Ok(()) } else { Err(PlatformError::System(format!("系统没能打开网址 {url}").into())) }
     }
 
@@ -803,10 +899,16 @@ impl SingleInstanceService for NativeBackend {
 mod generic {
     use raw_window_handle::HasWindowHandle;
 
+    /// Windows：省电模式（节电模式、节能模式）开着；其他平台总是 `false`
     pub fn is_low_power_mode() -> bool {
+        #[cfg(target_os = "windows")]
+        return crate::system::windows::is_low_power_mode();
+        #[cfg(not(target_os = "windows"))]
         false
     }
 
+    /// Windows 的在 `display.rs`
+    #[cfg(not(target_os = "windows"))]
     pub fn display_color(_window: &dyn HasWindowHandle) -> Option<crate::DisplayColor> {
         None
     }
@@ -843,8 +945,15 @@ mod generic {
         None
     }
 
-    pub fn bring_to_front(_window: &dyn HasWindowHandle) -> bool {
-        false
+    /// Windows：还原最小化、设成前台窗口（系统不许抢前台时闪任务栏按钮）；其他平台由窗口库做，返回 `false`
+    pub fn bring_to_front(window: &dyn HasWindowHandle) -> bool {
+        #[cfg(target_os = "windows")]
+        return crate::system::windows::bring_to_front(window);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = window;
+            false
+        }
     }
 
     /// 只有 macOS 要：别的平台上从终端启动的窗口照常拿得到键盘
@@ -857,8 +966,15 @@ mod generic {
         false
     }
 
-    pub fn pointer_position(_window: &dyn HasWindowHandle) -> Option<[f32; 2]> {
-        None
+    /// Windows：问系统指针在哪（`GetCursorPos`），换到窗口里的逻辑像素；其他平台是 `None`
+    pub fn pointer_position(window: &dyn HasWindowHandle) -> Option<[f32; 2]> {
+        #[cfg(target_os = "windows")]
+        return crate::system::windows::pointer_position(window);
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = window;
+            None
+        }
     }
 
 }

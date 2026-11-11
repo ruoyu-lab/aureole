@@ -167,6 +167,16 @@ props! {
         reset: [|t, id| t.accessibility_set(id, |p| p.expanded = None)],
     }
 
+    /// 这个元素是外面有焦点的容器里的当前项（表格键盘走到的那一行）：键盘焦点还在容器上，
+    /// 读屏软件的焦点跟着它走，移到哪一项念哪一项。一个容器里同一时刻只该有一个
+    accessibility_active: bool = false => {
+        order: 115, storage: Accessibility, dirty: ACCESSIBILITY, applies: ANY, inherited: false, anim: [],
+        method: editor, style: false, late: false, bind: typed,
+        write: |t, id, v| t.accessibility_set_active(id, v),
+        read: |t, id| t.accessibility.props.get(id).map(|p| p.active),
+        reset: [|t, id| t.accessibility_set_active(id, false)],
+    }
+
     /// 数值和范围（滑块、进度条）。没设角色时：有 [`Element::on_value_request`] 的是滑块，没有的是进度条
     ///
     /// ```no_run
@@ -1122,7 +1132,7 @@ props! {
         reset: [|t, id| t.clear_color(id)],
     }
 
-    /// 字体族名，可以继承。系统里装的字体直接用名字；自己带的字体先用 [`crate::font::load`] 加载。
+    /// 字体族名，可以继承，逗号隔开几个时前面的优先（`"Monaco, Menlo"`）。系统里装的字体直接用名字；自己带的字体先用 [`crate::font::load`] 加载。
     /// 这个字体里没有的字（比如英文字体里的中文）从系统字体回退
     font_family: String = String::new() => {
         order: 1030, storage: Text, dirty: TEXT, applies: ANY, inherited: true, anim: [],

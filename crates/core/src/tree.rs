@@ -69,12 +69,12 @@ mod sources;
 mod timeline;
 pub(crate) use accessibility::action as accessibility_action;
 pub(crate) use accessibility::VIRTUAL;
-pub(crate) use kinds::clusters;
+pub(crate) use kinds::{clusters, image_area};
 pub(crate) use accessibility::accessibility_id;
 pub use drag_drop::DragOutRequest;
-pub(crate) use drag_drop::finish_out;
+pub(crate) use drag_drop::{finish_out, visit_drop, visit_leave, visit_over};
 pub(crate) use route::{
-    cancel_pointer, end_composition, external_drag_leave, external_drag_over, external_drop, field_change, file_drop, file_hover, ime, key_down, key_up, mouse_button, pinch, pointer_move,
+    cancel_pointer, end_composition, external_drag_leave, external_drag_over, external_drop, field_change, file_drop, file_hover, hand_off, ime, key_down, key_up, mouse_button, pinch, pointer_move,
     refresh_hover, release_keys, rotate,
     set_modifiers,
     touch_cancel, touch_down, touch_move, touch_up,

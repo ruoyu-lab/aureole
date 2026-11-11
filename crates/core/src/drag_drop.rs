@@ -12,6 +12,8 @@ use std::rc::Rc;
 use reactive::Scope;
 
 use crate::element::Element;
+use crate::image::RgbaImage;
+use crate::rich_text::{Span, SpanInfo};
 use crate::event::IntoHandler;
 use crate::handlers::{EventType, Handler, owned, owned_ref};
 use crate::input::Modifiers;
@@ -57,17 +59,21 @@ impl fmt::Debug for DropEvent {
     }
 }
 
-/// 拖到应用外面的内容，见 [`Element::drag_out`]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// 拖到应用外面的内容，见 [`Element::drag_out`]。和剪贴板一样，同一份内容可以有几种表示，接收的程序挑自己认的：
+/// `DragOut::image(图).with_text("说明")`
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DragOut {
     files: Vec<PathBuf>,
     text: Option<String>,
+    rich_text: Vec<SpanInfo>,
+    image: Option<RgbaImage>,
+    custom: Vec<(String, Vec<u8>)>,
 }
 
 impl DragOut {
     /// 一个或几个文件（要已经存在）：拖到访达里是拷贝过去，拖到其他应用里是打开或插入
     pub fn files(paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
-        Self { files: paths.into_iter().map(Into::into).collect(), text: None }
+        Self::default().with_files(paths)
     }
 
     /// 一个文件
@@ -77,7 +83,55 @@ impl DragOut {
 
     /// 纯文本：拖到文本编辑器里插入，拖到访达里存成文本剪辑
     pub fn text(text: impl Into<String>) -> Self {
-        Self { files: Vec::new(), text: Some(text.into()) }
+        Self::default().with_text(text)
+    }
+
+    /// 带格式的文字（一串 [`Span`]）：认带格式文字的程序插入带样式的文字，别的程序拿到它的纯文字（没给纯文字时是这些段连起来）
+    pub fn rich_text(spans: impl IntoIterator<Item = impl Into<Span>>) -> Self {
+        Self::default().with_rich_text(spans)
+    }
+
+    /// 图片：拖到能放图片的程序里插入，拖到访达、资源管理器里存成图片文件（看系统）
+    pub fn image(image: impl Into<RgbaImage>) -> Self {
+        Self::default().with_image(image)
+    }
+
+    /// 应用自己定的格式（和剪贴板的 `custom` 一样：反向域名的格式名，字节原样交出去）。拖到同一个应用的别的窗口、
+    /// 同一个应用的别的实例里时，接收方按名字读（[`Element::on_external_drop`] 收到的数据里）
+    pub fn custom(format: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        Self::default().with_custom(format, bytes)
+    }
+
+    /// 换成这些文件
+    pub fn with_files(mut self, paths: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.files = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// 换成这段纯文字
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// 换成这段带格式的文字
+    pub fn with_rich_text(mut self, spans: impl IntoIterator<Item = impl Into<Span>>) -> Self {
+        self.rich_text = spans.into_iter().map(|span| span.into().info()).collect();
+        self
+    }
+
+    /// 换成这张图片
+    pub fn with_image(mut self, image: impl Into<RgbaImage>) -> Self {
+        self.image = Some(image.into());
+        self
+    }
+
+    /// 加一种应用自己定的格式；同一个格式名放两次时后放的算数
+    pub fn with_custom(mut self, format: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
+        let format = format.into();
+        self.custom.retain(|(name, _)| *name != format);
+        self.custom.push((format, bytes.into()));
+        self
     }
 
     /// 要拖的文件
@@ -90,9 +144,24 @@ impl DragOut {
         self.text.as_deref()
     }
 
-    /// 没有东西可拖（文件都不存在、文字为空）
+    /// 要拖的带格式的文字（空的是没有）
+    pub fn rich_text_content(&self) -> &[SpanInfo] {
+        &self.rich_text
+    }
+
+    /// 要拖的图片
+    pub fn image_content(&self) -> Option<&RgbaImage> {
+        self.image.as_ref()
+    }
+
+    /// 要拖的应用自己定的格式
+    pub fn custom_content(&self) -> &[(String, Vec<u8>)] {
+        &self.custom
+    }
+
+    /// 没有东西可拖（文件都不存在、文字为空，也没有别的）
     pub fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.text.as_deref().is_none_or(str::is_empty)
+        self.files.is_empty() && self.text.as_deref().is_none_or(str::is_empty) && self.rich_text.is_empty() && self.image.is_none() && self.custom.is_empty()
     }
 
     /// 去掉不存在的文件（每个记一条警告）
@@ -213,11 +282,11 @@ impl Element {
         self.listen(EventType::DragLeave, Handler::DropEvent(handler.into_handler()))
     }
 
-    /// 能拖到应用外面（访达、桌面、其他应用）：按下后移动超过 4 像素时调用 `items`，交给系统开始拖
-    /// （macOS 上是系统的拖动会话，拖动的图像是文件的图标）。同时是 [`Element::draggable`] 时先在应用里拖，
-    /// 拖出窗口时才交给系统。结束时调用 [`Element::on_drag_out_end`]。
+    /// 能拖到应用外面（访达、资源管理器、桌面、其他应用）：按下后移动超过 4 像素时调用 `items`，交给系统开始拖
+    /// （系统的拖动会话；拖动的图像是文件的图标，只拖图片时是这张图，只拖文字时是纯文本的图标）。
+    /// 同时是 [`Element::draggable`] 时先在应用里拖，拖出窗口时才交给系统。结束时调用 [`Element::on_drag_out_end`]。
     ///
-    /// 只有 macOS 实现了；其他平台上什么都不做，`on_drag_out_end` 收到 `false`
+    /// macOS、Windows 有；Linux 上什么都不做，`on_drag_out_end` 收到 `false`
     ///
     /// ```no_run
     /// # use aureole::prelude::*;

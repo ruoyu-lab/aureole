@@ -9,7 +9,8 @@
 //!
 //! 改窗口大小时不用旧布局抢着画（旧布局画在新尺寸上位置是错的，下一帧又弹回来）：[`RenderMsg::Resize`] 之后等
 //! [`RenderMsg::ResizeFrameDone`]，主线程在这之间按新大小出一帧。macOS 上这一帧画好后交回主线程呈现（[`DrawnFrame`]），
-//! 进系统改窗口大小的事务，画面和窗口的新大小同时生效；别的平台画完直接呈现。
+//! 进系统改窗口大小的事务，画面和窗口的新大小同时生效；Windows 上渲染线程画完自己呈现，呈现了告诉在改大小的消息里等着的主线程
+//! （[`ResizeSync::Presented`]），新画面赶上窗口新大小的那一次合成；别的平台画完直接呈现。积压的几次改大小只按最后一次配置表面。
 //!
 //! 表面平时是 8 位 sRGB；主线程决定要扩展范围的输出（画面里有广色域、HDR 的内容，显示器又支持，
 //! 见 `display`）时发 [`RenderMsg::Output`]，这里换成半精度浮点、线性扩展 sRGB 的表面，并记下显示器的余量。
@@ -30,8 +31,8 @@ use aureole_core::MainThreadSender;
 use std::any::Any;
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -60,6 +61,15 @@ pub fn set_group_cache_budget(bytes: u64) {
 /// 改大小时把画好的一帧交回主线程呈现。没有缓冲：主线程等不及先走了的话，渲染线程当场知道，自己呈现
 pub(crate) type PresentHandoff = SyncSender<DrawnFrame>;
 
+/// 改大小之后的这一帧怎么和窗口的新大小对上
+pub(crate) enum ResizeSync {
+    /// 画好的纹理交回主线程呈现，进系统改窗口大小的事务（macOS）
+    Handoff(PresentHandoff),
+    /// 渲染线程自己呈现，呈现了发一条（Windows）：主线程在改大小的消息里等着，等到了才让系统接着改，
+    /// 新画面赶上窗口新大小的那一次合成。没画就放掉，主线程马上不等
+    Presented(SyncSender<()>),
+}
+
 /// 渲染线程画好、等主线程呈现的一帧。呈现完渲染线程才接着走：一个表面同时只能取出一张纹理
 pub(crate) struct DrawnFrame {
     texture: wgpu::SurfaceTexture,
@@ -82,8 +92,8 @@ pub(crate) enum RenderMsg {
     Frame { scene: Option<Scene>, layers: Box<LayerUpdates>, atlas: Vec<AtlasUpdate> },
     Resize(Viewport),
     /// 改大小之后这一帧的消息发完了（[`RenderMsg::Resize`] 之后到这条之前不画：新布局还没到，旧布局画在新尺寸上位置是错的）。
-    /// 带着一头时，这一帧的表面纹理交给主线程呈现：和窗口的新大小在同一个系统事务里生效
-    ResizeFrameDone(Option<PresentHandoff>),
+    /// 带着 [`ResizeSync`] 时，这一帧按它和窗口的新大小对上
+    ResizeFrameDone(Option<ResizeSync>),
     /// 窗口被完全挡住 / 重新露出来
     Occluded(bool),
     /// 表面的颜色输出：扩展范围（广色域、HDR）还是 8 位 sRGB，显示器此刻的余量（8 位时是 1）
@@ -104,10 +114,12 @@ fn window_renderer(gpu: &Gpu, format: wgpu::TextureFormat, transparent: bool) ->
     renderer
 }
 
-/// 表面的透明度模式：透明的窗口（有窗口材质）用预乘透明度，别的窗口用表面默认的第一种
+/// 表面的透明度模式：透明的窗口（有窗口材质）用预乘透明度，别的窗口不透明（有的话；系统合成的对象上的表面默认的第一种是"自动"，
+/// 交换链按未指定建），没有时用表面默认的第一种
 fn alpha_mode(caps: &wgpu::SurfaceCapabilities, transparent: bool) -> wgpu::CompositeAlphaMode {
     let transparent = transparent.then(|| render::transparent_alpha_mode(caps)).flatten();
-    transparent.unwrap_or(caps.alpha_modes[0])
+    let opaque = caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque).then_some(wgpu::CompositeAlphaMode::Opaque);
+    transparent.or(opaque).unwrap_or(caps.alpha_modes[0])
 }
 
 /// 积压的消息里要上传的显示列表：整份新的，或者只修补过（改过的几段，几帧的合在一起）
@@ -130,6 +142,20 @@ impl Upload {
         }
     }
 }
+
+/// 所有窗口的渲染线程共用一个设备。配置表面时 wgpu 要先等设备空闲，等的时候别的线程提交了就算配置失败（`GpuWaitTimeout`），
+/// 表面留在旧大小、渲染器却按新大小画：一个窗口改大小时另一个窗口在动画就会碰上。配置拿写锁，提交一帧拿读锁：
+/// 窗口之间照常一起画，配置的那一下没人提交
+static DEVICE_GATE: RwLock<()> = RwLock::new(());
+
+/// 配置表面（见 [`DEVICE_GATE`]）
+fn configure(surface: &wgpu::Surface<'_>, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
+    let _exclusive = DEVICE_GATE.write().unwrap_or_else(|e| e.into_inner());
+    surface.configure(device, config);
+}
+
+/// 改大小的那一帧呈现以后最多等 GPU 这么久（一般不到 1 毫秒）
+const RESIZE_GPU_WAIT: Duration = Duration::from_millis(20);
 
 /// 主线程两帧之间的间隔，开始时按 60Hz 估计，之后按实际测量
 const INITIAL_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -159,6 +185,8 @@ pub(crate) struct RenderThread {
     needs_redraw: bool,
     /// 只有合成层的滚动偏移（或者纹理的内容：动图换帧）变了：重画一次，不用重新上传图元
     needs_composite: bool,
+    /// 上次画的时候外部纹理的登记表的版本（[`render::external_revision`]）：变了要重画，显示列表没变也一样
+    external: u64,
     /// 表面这会儿给不出纹理（超时、窗口看不见）：要画的留着，等下一条消息来了再试，不空转
     surface_blocked: bool,
     /// 最近一帧主线程的时间，和收到它的时刻：主线程卡住时滚动、合成层的动画按这个对应关系往后推
@@ -173,8 +201,8 @@ pub(crate) struct RenderThread {
     awaiting_refill: bool,
     /// 改了大小、新布局还没到：这期间不画（旧布局画在新尺寸上，位置是错的）
     awaiting_resize_frame: bool,
-    /// 下一帧画好后交给主线程呈现
-    handoff: Option<PresentHandoff>,
+    /// 下一帧画好后交给主线程呈现，或者呈现了告诉它
+    handoff: Option<ResizeSync>,
     /// 表面现在设成了呈现时进系统动画事务
     present_in_transaction: bool,
     /// 和主线程共用：置位后主线程下一帧发 [`RenderMsg::Refill`]
@@ -218,7 +246,7 @@ impl RenderThread {
             alpha_mode: alpha_mode(&caps, transparent),
             view_formats: vec![],
         };
-        surface.configure(&gpu.device, &config);
+        configure(&surface, &gpu.device, &config);
         render::keep_surface_contents_unscaled(&surface);
         // 测试恢复用的开关：只在调试构建里读，发布的应用没有这条路
         let simulate_loss = cfg!(debug_assertions).then(|| std::env::var("AUREOLE_SIMULATE_DEVICE_LOSS").ok().and_then(|s| s.parse::<f64>().ok())).flatten();
@@ -238,6 +266,7 @@ impl RenderThread {
             occluded: false,
             needs_redraw: true,
             needs_composite: false,
+            external: render::external_revision(),
             surface_blocked: false,
             anchor: None,
             host: f64::NEG_INFINITY,
@@ -346,6 +375,7 @@ impl RenderThread {
 
             // 一次取完积压的消息，只画最新的一帧：积压的几份显示列表只上传最后一份（只修补过的合起来上传改过的几段）
             let mut upload: Option<Upload> = None;
+            let mut resized: Option<Viewport> = None;
             for msg in first.into_iter().chain(receiver.try_iter()) {
                 match msg {
                     RenderMsg::Frame { scene, layers, atlas } => {
@@ -355,6 +385,10 @@ impl RenderThread {
                             self.renderer.apply_atlas(&self.gpu.device, &self.gpu.queue, &atlas);
                         }
                         self.needs_composite |= !atlas.is_empty();
+                        // 外部纹理（内嵌的 CEF 视图）出了新的一帧：显示列表可能没变，也要重画
+                        let external = render::external_revision();
+                        self.needs_composite |= external != self.external;
+                        self.external = external;
                         // 滚动先推进到主线程这一帧的时间，再收下主线程改过的状态（已经在这个时间上）
                         self.needs_composite |= self.compositor.advance_scrolls(layers.time);
                         self.anchor = Some((layers.time, Instant::now()));
@@ -371,7 +405,7 @@ impl RenderThread {
                         self.needs_composite |= self.compositor.apply(*layers);
                     }
                     RenderMsg::Resize(viewport) => {
-                        self.resize(viewport);
+                        resized = Some(viewport);
                         self.awaiting_resize_frame = true;
                     }
                     RenderMsg::ResizeFrameDone(handoff) => {
@@ -392,6 +426,11 @@ impl RenderThread {
                 }
             }
 
+            // 积压的几次改大小只按最后一次配置表面：重建交换链一次要十几毫秒，拖动窗口边缘时每秒几百次改大小，
+            // 一次次重建的话一帧都画不出来，松手后还要把排着的重建做完画面才跟上
+            if let Some(viewport) = resized {
+                self.resize(viewport);
+            }
             if let Some(upload) = upload {
                 self.upload(upload);
             }
@@ -460,7 +499,7 @@ impl RenderThread {
         self.config.width = viewport.width.min(max);
         self.config.height = viewport.height.min(max);
         self.scale = viewport.scale_factor;
-        self.surface.configure(&self.gpu.device, &self.config);
+        configure(&self.surface, &self.gpu.device, &self.config);
         self.needs_redraw = true;
     }
 
@@ -473,7 +512,7 @@ impl RenderThread {
         {
             self.config.format = format;
             self.config.color_space = color_space;
-            self.surface.configure(&self.gpu.device, &self.config);
+            configure(&self.surface, &self.gpu.device, &self.config);
         }
         self.needs_redraw = true;
     }
@@ -486,7 +525,7 @@ impl RenderThread {
         let mode = alpha_mode(&self.caps, transparent);
         if mode != self.config.alpha_mode {
             self.config.alpha_mode = mode;
-            self.surface.configure(&self.gpu.device, &self.config);
+            configure(&self.surface, &self.gpu.device, &self.config);
         }
         self.needs_redraw = true;
     }
@@ -510,7 +549,9 @@ impl RenderThread {
 
     /// 重新配置表面、重建渲染器，之后在等主线程交来图集和显示列表的完整内容（设备丢失、出错后的重建共用）
     fn rebuild_renderer(&mut self) {
-        self.surface.configure(&self.gpu.device, &self.config);
+        // 换了设备时，第一次配置还想在旧设备的交换链上改大小（DX12），失败后丢掉它；再配置一次才在新设备上建交换链
+        configure(&self.surface, &self.gpu.device, &self.config);
+        configure(&self.surface, &self.gpu.device, &self.config);
         let format = render::surface_format(&self.caps, false).map_or(self.config.format, |(format, ..)| format);
         self.renderer = window_renderer(&self.gpu, format, self.transparent);
         self.renderer.set_headroom(self.headroom);
@@ -556,15 +597,22 @@ impl RenderThread {
     /// `work`：这一轮的工作开始的时刻（记录每帧耗时用）
     fn render(&mut self, work: Instant) {
         let handoff = self.handoff.take();
-        if handoff.is_some() != self.present_in_transaction {
-            self.present_in_transaction = handoff.is_some();
+        let in_transaction = matches!(handoff, Some(ResizeSync::Handoff(_)));
+        if in_transaction != self.present_in_transaction {
+            self.present_in_transaction = in_transaction;
             render::set_surface_present_in_transaction(&self.surface, self.present_in_transaction);
         }
         let acquire = Instant::now();
-        let surface_texture = match self.surface.get_current_texture() {
+        let mut current = self.surface.get_current_texture();
+        // 交换链过时了（Vulkan 上窗口刚改了大小）：重新配置后马上再取一次，不然这一帧丢了、要画的留到下一条消息才画
+        if matches!(current, wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) {
+            configure(&self.surface, &self.gpu.device, &self.config);
+            current = self.surface.get_current_texture();
+        }
+        let surface_texture = match current {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.gpu.device, &self.config);
+                self.surface_blocked = true;
                 return;
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -583,9 +631,18 @@ impl RenderThread {
         let viewport = Viewport { width: self.config.width, height: self.config.height, scale_factor: self.scale };
         let layers = self.compositor.transforms();
         let time = Duration::from_secs_f64(self.compositor.animation_time().max(0.0));
-        self.renderer.render(&self.gpu, &surface_texture.texture, viewport, &layers, time, self.background, None);
+        {
+            let _submitting = DEVICE_GATE.read().unwrap_or_else(|e| e.into_inner());
+            self.renderer.render(&self.gpu, &surface_texture.texture, viewport, &layers, time, self.background, None);
+        }
         match handoff {
-            Some(main) => hand_over(&main, surface_texture, self.gpu.queue.clone()),
+            Some(ResizeSync::Handoff(main)) => hand_over(&main, surface_texture, self.gpu.queue.clone()),
+            Some(ResizeSync::Presented(done)) => {
+                self.gpu.queue.present(surface_texture);
+                // 等 GPU 画完再告诉主线程：主线程一返回系统就把新的窗口大小交给合成器，这一帧那时要能上屏
+                let _ = self.gpu.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(RESIZE_GPU_WAIT) });
+                let _ = done.try_send(());
+            }
             None => self.gpu.queue.present(surface_texture),
         }
         if let Some(feedback) = &self.feedback {

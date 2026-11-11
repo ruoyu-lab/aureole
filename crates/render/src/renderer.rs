@@ -392,6 +392,8 @@ pub struct Renderer {
     precompile: bool,
     /// 窗口透明，见 [`Renderer::set_transparent_output`]
     transparent: bool,
+    /// 外部纹理的登记表上次对到哪（`external.rs`）
+    external: crate::external::Seen,
 }
 
 impl Renderer {
@@ -421,6 +423,7 @@ impl Renderer {
             format,
             precompile: false,
             transparent: false,
+            external: crate::external::Seen::default(),
         }
     }
 
@@ -643,6 +646,10 @@ impl Renderer {
         now: Instant,
     ) -> wgpu::SubmissionIndex {
         let device = &gpu.device;
+        // 外部纹理换了、内容变了：绑定组跟上，有图片的分组不能再用缓存
+        if crate::external::sync(&mut self.res.images, gpu, &mut self.external) {
+            self.cache.state.images += 1;
+        }
         let layers = if layers.is_empty() { vec![LayerTransform::IDENTITY] } else { layers.to_vec() };
         let budget = self.budget.unwrap_or_else(|| BUDGET.load(Ordering::Relaxed));
         self.cache.state.begin_frame();

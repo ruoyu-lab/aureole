@@ -1,20 +1,24 @@
 //! 拖到应用外面（macOS）：用 AppKit 的拖动会话（`beginDraggingSessionWithItems:event:source:`）
-//! 把文件、文字交给访达和其他应用。拖动的图像是文件（或纯文本）的系统图标。
+//! 把内容交给访达和其他应用。文件一项一个网址；文字、带格式的文字、图片、应用自己定的格式放在同一项上
+//! （和剪贴板一样），接收的程序挑自己认的。拖动的图像是文件的系统图标，只拖图片时是这张图，只拖文字时是纯文本的图标。
 //!
 //! 会话开始以后由系统接管指针，在自己的事件循环里等指针松开；这个循环套在应用的事件循环里面，
 //! 它不返回，应用的退出请求就不生效。应用要退出时先取消会话（[`cancel_drag_out`]）。
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent,
-    NSEventModifierFlags, NSEventType, NSImage, NSView, NSWorkspace,
+    NSEventModifierFlags, NSEventType, NSImage, NSPasteboardItem, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString,
+    NSPasteboardTypeTIFF, NSView, NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSPoint, NSRect, NSSize, NSString, NSURL};
+
+use crate::ClipboardContent;
 use objc2_uniform_type_identifiers::UTType;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -73,17 +77,20 @@ thread_local! {
     static SESSION: RefCell<Option<(Retained<NSDraggingSession>, isize)>> = const { RefCell::new(None) };
 }
 
-/// 开始把文件（要已经存在）或纯文本拖到应用外面，`at` 是指针在窗口内容区里的位置（逻辑像素）。
+/// 这个进程自己拖出去的标记（拖动项上的类型）：内容是空的时（应用自己的窗口之间拖元素）只有它，自己的窗口登记了它
+pub(crate) const OWN_TYPE: &str = "org.aureole.own-drag";
+
+/// 有一次拖出去的会话还没结束：自己的窗口上经过的拖放就是它
+pub(crate) fn dragging_out() -> bool {
+    SOURCE.with(|s| s.borrow().as_ref().is_some_and(|source| source.ivars().on_end.borrow().is_some()))
+}
+
+/// 开始把内容（文件要已经存在）拖到应用外面，`at` 是指针在窗口内容区里的位置（逻辑像素）。
 /// 要在处理指针拖动事件时调用（系统的会话从这个事件开始，接管之后的指针移动和松开）；
 /// 当前事件不是指针事件时在 `at` 造一个。会话结束时调用 `on_end`，参数是有没有被接住。
-/// 开始不了（没有窗口、没有东西可拖）时返回 `false`，不调用 `on_end`
-pub fn begin_drag_out(
-    window: &dyn HasWindowHandle,
-    files: &[PathBuf],
-    text: Option<&str>,
-    at: [f32; 2],
-    on_end: Box<dyn FnOnce(bool)>,
-) -> bool {
+/// 内容可以是空的：只有这个进程自己的窗口认得这次拖放（[`crate::external_drag::ExternalDataKinds::own`]）。
+/// 开始不了（没有窗口）时返回 `false`，不调用 `on_end`
+pub fn begin_drag_out(window: &dyn HasWindowHandle, content: &ClipboardContent, at: [f32; 2], on_end: Box<dyn FnOnce(bool)>) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     let Ok(handle) = window.window_handle() else { return false };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return false };
@@ -96,16 +103,17 @@ pub fn begin_drag_out(
 
     let mut items = Vec::new();
     let workspace = NSWorkspace::sharedWorkspace();
-    for path in files.iter().filter(|p| p.exists()) {
+    for path in content.files.iter().filter(|p| p.exists()) {
         let url = file_url(path);
         let icon = workspace.iconForFile(&NSString::from_str(&path.to_string_lossy()));
         items.push(item(ProtocolObject::from_ref(&*url), &icon, point, items.len()));
     }
-    if let Some(text) = text.filter(|t| !t.is_empty()) {
-        let string = NSString::from_str(text);
-        let plain = UTType::typeWithIdentifier(&NSString::from_str("public.plain-text"));
-        let icon = plain.map_or_else(|| workspace.iconForFile(&NSString::from_str("/")), |t| workspace.iconForContentType(&t));
-        items.push(item(ProtocolObject::from_ref(&*string), &icon, point, items.len()));
+    if let Some((data, icon)) = data_item(content, !items.is_empty()) {
+        let icon = icon.unwrap_or_else(|| {
+            let plain = UTType::typeWithIdentifier(&NSString::from_str("public.plain-text"));
+            plain.map_or_else(|| workspace.iconForFile(&NSString::from_str("/")), |t| workspace.iconForContentType(&t))
+        });
+        items.push(item(ProtocolObject::from_ref(&*data), &icon, point, items.len()));
     }
     if items.is_empty() {
         return false;
@@ -142,6 +150,43 @@ pub fn begin_drag_out(
     SOURCE.with(|s| *s.borrow_mut() = Some(source));
     SESSION.with(|s| *s.borrow_mut() = Some((session, ns_window.windowNumber())));
     true
+}
+
+/// 文字、带格式的文字、图片、应用自己定的格式放在同一项上（和剪贴板一样）；都没有、有文件（`files`）时是 `None`，
+/// 什么都没有时只放自己的标记 [`OWN_TYPE`]。有图片时第二项是用这张图做的拖动图像
+fn data_item(content: &ClipboardContent, files: bool) -> Option<(Retained<NSPasteboardItem>, Option<Retained<NSImage>>)> {
+    let text = content.text.as_deref().filter(|text| !text.is_empty());
+    let nothing = text.is_none() && content.rich_text.is_none() && content.image.is_none() && content.custom.is_empty();
+    if nothing && files {
+        return None;
+    }
+    let item = NSPasteboardItem::new();
+    if nothing {
+        item.setData_forType(&NSData::with_bytes(&[]), &NSString::from_str(OWN_TYPE));
+    }
+    // SAFETY: 类型常量是 AppKit 导出的不可变字符串，链接后一直有效
+    let (string, rich, png, tiff) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeRTF, NSPasteboardTypePNG, NSPasteboardTypeTIFF) };
+    if let Some(text) = text {
+        item.setString_forType(&NSString::from_str(text), string);
+    }
+    if let Some(data) = &content.rich_text {
+        item.setData_forType(&NSData::with_bytes(data), rich);
+    }
+    let mut icon = None;
+    if let Some(image) = &content.image {
+        match crate::clipboard::macos::encode_image(image) {
+            Ok((png_data, tiff_data)) => {
+                item.setData_forType(&png_data, png);
+                item.setData_forType(&tiff_data, tiff);
+                icon = NSImage::initWithData(NSImage::alloc(), &png_data);
+            }
+            Err(error) => tracing::debug!("拖出去的图片编码不了，不带它：{error}"),
+        }
+    }
+    for (format, bytes) in &content.custom {
+        item.setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(format));
+    }
+    Some((item, icon))
 }
 
 /// 取消正在进行的拖动会话（应用要退出时）：会话按没被接住结束（调用 `on_end(false)`），图像不滑回原处。

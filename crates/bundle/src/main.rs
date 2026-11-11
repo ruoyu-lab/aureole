@@ -22,6 +22,8 @@
 //! ```
 //!
 //! 自己写安装程序时要写进系统的东西（注册表、`.desktop`、MIME 声明）用 `--emit` 生成。
+//!
+//! 应用直接依赖 CEF 视图（`aureole-webview`）时，Windows 的安装包里多带它的子进程程序和 CEF 的运行文件（见 `webview.rs`）。
 
 mod associations;
 mod exe_icon;
@@ -31,6 +33,7 @@ mod icon;
 mod plist;
 mod self_installer;
 mod stub;
+mod webview;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -216,20 +219,55 @@ fn run(args: Args) -> Result<(), String> {
     if args.universal && os != "macos" {
         return Err("--universal 只能在 macOS 上用".into());
     }
+    if options.webview.is_some() {
+        webview::check(os, &formats)?;
+        if args.universal {
+            return Err("用到 CEF 视图的应用打不了通用二进制：CEF 的内核框架分 Apple 芯片和 Intel 两份，各打各的（--target）".into());
+        }
+    }
+    // 开沙箱：应用要有编成动态库的库（导出 bootstrap 找的入口）
+    let sandbox = options.webview.as_ref().is_some_and(|w| w.sandbox);
+    let library = match sandbox {
+        true => Some(webview::library_target(package).ok_or(
+            "开沙箱要把应用编成动态库：Cargo.toml 里加 [lib] crate-type = [\"cdylib\", \"rlib\"]（库名和程序名不要一样），\
+             库里用 aureole_webview::bootstrap_entry!(应用的入口函数) 导出入口",
+        )?),
+        false => None,
+    };
 
     let package_name = package["name"].as_str().unwrap_or_default();
-    let exe = if args.universal {
-        build_universal(package_name, &options.bin, args.release, args.features.as_deref(), &out_dir(&metadata)?)?
-    } else {
-        build(package_name, &options.bin, args.release, args.target.as_deref(), args.features.as_deref())?
-    };
     let out_dir = out_dir(&metadata)?;
-    let exe = packaged_exe(&exe, &options, os, args.release && !args.keep_symbols, &out_dir)?;
+    let strip = args.release && !args.keep_symbols;
+    // 开沙箱时编动态库，程序是改了名的 bootstrap（CEF 的运行文件、bootstrap 在动态库旁边）
+    let (exe, runtime_dir, library) = if args.universal {
+        let exe = build_universal(package_name, &options.bin, args.release, args.features.as_deref(), &out_dir)?;
+        (exe, None, None)
+    } else if let Some(library) = &library {
+        let dll = build_library(package_name, library, args.release, args.target.as_deref(), args.features.as_deref())?;
+        let exe = bootstrap_program(&dll, &options, &out_dir)?;
+        let dir = dll.parent().map(Path::to_path_buf);
+        (exe, dir, Some(dll))
+    } else {
+        let exe = build(package_name, &options.bin, args.release, args.target.as_deref(), args.features.as_deref())?;
+        let dir = exe.parent().map(Path::to_path_buf);
+        (exe, dir, None)
+    };
+    let exe = packaged_exe(&exe, &options, os, strip, &out_dir)?;
+    if os == "windows" {
+        exe_icon::embed_version(&exe, &version_info(&options, &exe))?;
+    }
+    let webview_files = webview_runtime(&options, runtime_dir.as_deref(), library.as_deref(), &exe, os, args.release, args.target.as_deref(), strip, &out_dir)?;
     if formats.contains(&Format::App) {
         if os != "macos" {
             eprintln!("提示：在 {os} 上只能生成 .app 的目录结构；签名和 .dmg 需要 macOS 的 codesign、hdiutil");
         }
         let app = assemble(&options, &exe, &out_dir)?;
+        if let Some(runtime) = &webview_files
+            && let (Some(framework), Some(helper)) = (&runtime.framework, &runtime.helper)
+        {
+            let bytes = webview::install_macos(&app, &options.bin, &options.identifier, helper, framework)?;
+            println!("CEF 视图：内核框架和 5 个辅助程序的包装进了 Contents/Frameworks（{}）", human_size(bytes));
+        }
         if let Some(identity) = &args.sign
             && cfg!(target_os = "macos")
         {
@@ -242,7 +280,7 @@ fn run(args: Args) -> Result<(), String> {
         }
         println!("打开：open {:?}", app.display().to_string());
     }
-    installers::package(&options, &exe, &formats, args.target.as_deref(), &out_dir)?;
+    installers::package(&options, &exe, webview_files.as_ref(), &formats, args.target.as_deref(), &out_dir)?;
     if formats.contains(&Format::Installer) {
         let (stub_package, stub_bin) = options.installer.stub();
         let features = args.features.as_deref().filter(|_| stub_package == package_name);
@@ -252,8 +290,8 @@ fn run(args: Args) -> Result<(), String> {
             build_default_stub(&metadata, &out_dir, args.release, args.target.as_deref())?
         };
         let stub = packaged_exe(&stub, &options, os, args.release && !args.keep_symbols, &out_dir.join("installer-stub"))?;
-        exe_icon::embed_manifest(&stub)?;
-        let setup = self_installer::package(&options, &exe, &stub, args.target.as_deref(), os, &out_dir)?;
+        exe_icon::embed_manifest(&stub, exe_icon::AS_INVOKER_MANIFEST)?;
+        let setup = self_installer::package(&options, &exe, webview_files.as_ref(), &stub, args.target.as_deref(), os, &out_dir)?;
         println!("安装程序：{}（{}）", setup.display(), human_size(std::fs::metadata(&setup).map(|m| m.len()).unwrap_or(0)));
     }
     if !args.release {
@@ -362,7 +400,7 @@ fn run_build(mut command: Command, bin: &str) -> Result<PathBuf, String> {
 }
 
 /// 要放进包里的可执行文件：一份拷贝，`target` 里的不动（性能分析还要用）。
-/// Windows 上把应用的图标嵌进去（资源管理器、任务栏、快捷方式显示它）。Linux、macOS 上 `--release` 时去掉符号和调试信息：
+/// Windows 上把应用的图标（资源管理器、任务栏、快捷方式显示它）和包标识符（运行时声明成进程的应用标识）嵌进去。Linux、macOS 上 `--release` 时去掉符号和调试信息：
 /// 发布配置留着行号，Linux 上这能占到八成多（125 MB → 19 MB）；Windows 的调试信息本来就在单独的 .pdb 里
 fn packaged_exe(exe: &Path, options: &BundleOptions, os: &str, strip: bool, out_dir: &Path) -> Result<PathBuf, String> {
     let name = exe.file_name().ok_or_else(|| format!("可执行文件的路径 {} 不对", exe.display()))?;
@@ -372,6 +410,7 @@ fn packaged_exe(exe: &Path, options: &BundleOptions, os: &str, strip: bool, out_
     std::fs::copy(exe, &copy).map_err(|e| format!("拷贝 {} 失败：{e}", exe.display()))?;
     if os == "windows" {
         exe_icon::embed(&copy, &options.icon)?;
+        exe_icon::embed_identifier(&copy, &options.identifier)?;
         return Ok(copy);
     }
     if !strip {
@@ -394,6 +433,107 @@ fn packaged_exe(exe: &Path, options: &BundleOptions, os: &str, strip: bool, out_
             Ok(copy)
         }
     }
+}
+
+/// 用到 CEF 视图时：挑出 CEF 的运行文件（在 `dir` 里：编出来的应用、动态库旁边），应用嵌上 CEF 要的清单；
+/// 开沙箱时（有 `library`）带上应用的动态库（改名成和程序同名），不开时编子进程程序（和应用一样处理过，放在应用旁边）。
+/// `exe` 是要放进包里的程序
+fn webview_runtime(
+    options: &BundleOptions,
+    dir: Option<&Path>,
+    library: Option<&Path>,
+    exe: &Path,
+    os: &str,
+    release: bool,
+    target: Option<&str>,
+    strip: bool,
+    out_dir: &Path,
+) -> Result<Option<webview::Runtime>, String> {
+    let Some(settings) = &options.webview else { return Ok(None) };
+    let dir = dir.ok_or("找不到编出来的应用在哪个目录（CEF 的运行文件在它旁边）")?;
+    if os == "macos" {
+        // 内核框架和 5 个辅助程序的包在拼 .app 时装进 Contents/Frameworks（`webview::install_macos`）
+        let framework = webview::find_framework(dir)?;
+        let helper = build(webview::PACKAGE, webview::HELPER, release, target, None)?;
+        let helper = packaged_exe(&helper, options, os, strip, out_dir)?;
+        println!("CEF 视图：带上子进程程序和内核框架（{}）", framework.display());
+        let framework = webview::MacFramework { path: framework, locales: settings.locales.clone() };
+        return Ok(Some(webview::Runtime { helper: Some(helper), files: Vec::new(), framework: Some(framework) }));
+    }
+    let mut files = webview::runtime_files(dir, &settings.locales)?;
+    let helper = match library {
+        Some(library) => {
+            files.push((format!("{}.dll", options.bin), library.to_path_buf()));
+            None
+        }
+        None => {
+            // 子进程程序不带应用的特性：它只跑 CEF 的子进程
+            let helper = build(webview::PACKAGE, webview::HELPER, release, target, None)?;
+            let helper = packaged_exe(&helper, options, os, strip, out_dir)?;
+            if os == "windows" {
+                exe_icon::embed_version(&helper, &version_info(options, &helper))?;
+            }
+            Some(helper)
+        }
+    };
+    exe_icon::embed_manifest(exe, webview::MANIFEST)?;
+    let size: u64 = files.iter().filter_map(|(_, path)| std::fs::metadata(path).ok()).map(|m| m.len()).sum();
+    let what = if library.is_some() { "开了沙箱：带上应用的动态库" } else { "带上子进程程序" };
+    println!("CEF 视图：{what}和 CEF 的运行文件（{} 个，{}）", files.len(), human_size(size));
+    Ok(Some(webview::Runtime { helper, files, framework: None }))
+}
+
+/// 程序的版本信息：应用名、版本、发布者、版权、文件名
+fn version_info<'a>(options: &'a BundleOptions, exe: &'a Path) -> exe_icon::VersionInfo<'a> {
+    static PUBLISHER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    exe_icon::VersionInfo {
+        name: &options.name,
+        version: &options.version,
+        display_version: &options.full_version,
+        company: PUBLISHER.get_or_init(|| self_installer::publisher(options)),
+        copyright: options.copyright.as_deref().unwrap_or_default(),
+        file_name: exe.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+    }
+}
+
+/// 开沙箱时的程序：CEF 的 `bootstrap.exe`（在动态库旁边）拷成 `<可执行文件>.exe`，去掉它自己的图标、版本信息、清单
+/// （之后写应用的）。它启动时加载旁边同名的 `.dll`
+fn bootstrap_program(dll: &Path, options: &BundleOptions, out_dir: &Path) -> Result<PathBuf, String> {
+    let source = dll.parent().map(|dir| dir.join(webview::BOOTSTRAP)).filter(|p| p.is_file()).ok_or_else(|| {
+        format!("找不到 {}（CEF 带的，编译 CEF 视图时 cef-dll-sys 拷到动态库旁边）", webview::BOOTSTRAP)
+    })?;
+    let directory = out_dir.join("bootstrap");
+    std::fs::create_dir_all(&directory).map_err(|e| format!("创建 {} 失败：{e}", directory.display()))?;
+    let exe = directory.join(format!("{}.exe", options.bin));
+    std::fs::copy(&source, &exe).map_err(|e| format!("拷贝 {} 失败：{e}", source.display()))?;
+    exe_icon::remove_resources(&exe, &[exe_icon::RT_ICON, exe_icon::RT_GROUP_ICON, exe_icon::RT_VERSION, exe_icon::RT_MANIFEST])?;
+    Ok(exe)
+}
+
+/// 编应用的动态库（开沙箱时），返回 `.dll` 的路径
+fn build_library(package: &str, library: &str, release: bool, target: Option<&str>, features: Option<&str>) -> Result<PathBuf, String> {
+    let mut command = Command::new(cargo());
+    command.args(["build", "-p", package, "--lib", "--message-format=json-render-diagnostics", "--config", STATIC_CRT]);
+    if release {
+        command.arg("--release");
+    }
+    if let Some(target) = target {
+        command.args(["--target", target]);
+    }
+    if let Some(features) = features {
+        command.args(["--features", features]);
+    }
+    let output = command.stderr(Stdio::inherit()).output().map_err(|e| format!("运行 cargo build 失败：{e}"))?;
+    if !output.status.success() {
+        return Err("编译失败".into());
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == library)
+        .find_map(|m| m["filenames"].as_array()?.iter().filter_map(Value::as_str).find(|f| f.ends_with(".dll")).map(PathBuf::from))
+        .ok_or_else(|| format!("编译成功了，但没找到动态库 {library}.dll"))
 }
 
 /// 编 arm64 和 x86_64 两份，用 `lipo` 合成一个可执行文件，放在输出目录的 `universal/` 下

@@ -354,6 +354,14 @@ impl PaintContext<'_> {
     pub fn scale_factor(&self) -> f32 {
         self.tree.scale()
     }
+
+    /// 把一张外部纹理铺满内容区：框架以外的代码自己往 GPU 纹理里画（渲染器的 `ExternalTexture`，
+    /// `texture` 是它的编号）。圆角（元素的圆角减去内边距）、透明度、变换、裁剪和图片一样，边框画在上面。
+    /// 纹理的内容变了由登记它的代码报告，渲染线程自己重画，不用重新生成显示列表
+    pub fn external_texture(&mut self, texture: u32) {
+        let area = crate::tree::image_area(self.tree, self.id, self.area);
+        crate::image::push_external(texture, &area, self.list);
+    }
 }
 
 /// 种类对自己的描述（[`ElementKind::describe`]）

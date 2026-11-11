@@ -28,10 +28,15 @@ use crate::geometry::Rect;
 use crate::layout::Direction;
 use crate::tree::NodeId;
 
-/// 滚轮一格滚动的距离，逻辑像素：平台惯例里的（[`crate::Conventions::wheel_line_height`]）。macOS 的滚轮事件自带加速
+/// 一"行"的距离，逻辑像素：方向键滚一下、翻页留下的重叠（[`crate::Conventions::wheel_line_height`]）。macOS 的滚轮事件自带加速
 /// （转得快时一格有好几行），一行短一些；其他平台一格就是一行，按常见的三行文字算
 pub(crate) fn line() -> f32 {
     crate::system::conventions().wheel_line_height
+}
+
+/// 翻一页滚多远：视口的长度留一行重叠，至少一行（翻页键、系统设置成"一次滚动一个屏幕"的滚轮）
+pub(crate) fn page(viewport: f32) -> f32 {
+    (viewport - line()).max(line())
 }
 
 /// 橡皮筋系数：拉出去的距离按 `x·d·c / (d + c·x)` 显示，越拉越沉，最多接近一个视口
@@ -200,6 +205,64 @@ pub(crate) enum Request {
     By([f32; 2]),
     /// 竖向：第几行滚到顶上
     ToIndex { index: usize, animated: bool },
+}
+
+/// 元素的句柄：在别处（快捷键、按钮、数据变了之后）把这个元素滚进视口。
+/// 和信号一样是 `Copy` 的；先创建，再用 [`Element::element_handle`] 交给元素。请求在下一次布局之后执行：
+/// 刚加进来、刚改过的元素也按新的位置滚；元素还没挂载时，等它挂载后的那次布局。
+/// 虚拟列表里还没挂载的行用 [`ScrollHandle::scroll_to_index`]
+///
+/// ```no_run
+/// # use aureole::prelude::*;
+/// let latest = ElementHandle::new();
+/// let log = column().child(text("最新的一条").element_handle(latest));
+/// scroll_y(log).height(300);
+/// latest.scroll_into_view();
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ElementHandle {
+    pub(crate) request: Signal<RevealRequest>,
+    /// 已经执行过的请求编号：元素重新挂载时不再执行旧请求
+    pub(crate) handled: Signal<u64>,
+}
+
+/// 句柄发出的请求：编号递增，只执行比 `handled` 新的请求（挂载前发出的在挂载后执行）
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RevealRequest {
+    pub serial: u64,
+    pub animated: bool,
+}
+
+impl ElementHandle {
+    /// 新句柄，归当前作用域所有
+    pub fn new() -> Self {
+        Self { request: signal(RevealRequest::default()), handled: signal(0) }
+    }
+
+    /// 由内到外，每一层滚动视口平滑地滚到正好露出这个元素（四周留 8 逻辑像素）；已经露着的方向不动。
+    /// 和键盘把焦点移到看不见的元素上时一样，只是不改焦点
+    pub fn scroll_into_view(&self) {
+        self.request.update(|r| *r = RevealRequest { serial: r.serial + 1, animated: true });
+    }
+
+    /// 立即跳到露出这个元素，见 [`Self::scroll_into_view`]
+    pub fn jump_into_view(&self) {
+        self.request.update(|r| *r = RevealRequest { serial: r.serial + 1, animated: false });
+    }
+}
+
+impl Default for ElementHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Element {
+    /// 用句柄在别处操作这个元素（[`ElementHandle::scroll_into_view`]）。任何元素都能挂，不改变它能不能获得焦点
+    pub fn element_handle(mut self, handle: ElementHandle) -> Self {
+        self.interaction().element_handle = Some(handle);
+        self
+    }
 }
 
 impl Default for ScrollHandle {
@@ -571,12 +634,25 @@ impl Physics {
 
     /// 滚轮一格（或 `scroll_by`）：目标累加，弹簧平滑过去，不超出边缘
     pub fn wheel(&mut self, axis: usize, delta: f32) {
-        let from = match self.motion[axis] {
+        let target = self.clamp(axis, self.wheel_target(axis) + delta);
+        self.spring(axis, target, WHEEL, self.carried_velocity(axis));
+    }
+
+    /// 滚轮报来的不足一格的位移（精确式触控板、高分辨率滚轮）：直接跟着走，不超出边缘。
+    /// 前面整格的弹簧还没走完时从它的目标接着走，剩下的那段一下到位，不丢
+    pub fn precise_wheel(&mut self, axis: usize, delta: f32) {
+        let from = self.wheel_target(axis);
+        self.motion[axis] = ScrollPhase::Idle;
+        self.velocity[axis] = 0.0;
+        self.offset[axis] = self.clamp(axis, from + delta);
+    }
+
+    /// 滚轮接着往哪儿累加：滚轮的弹簧在走时是它的目标，否则是现在的位置（拉过边缘的从边缘算）
+    fn wheel_target(&self, axis: usize) -> f32 {
+        match self.motion[axis] {
             ScrollPhase::Spring { target, omega, .. } if omega == TAU / WHEEL => target,
             _ => self.clamp(axis, self.offset[axis]),
-        };
-        let target = self.clamp(axis, from + delta);
-        self.spring(axis, target, WHEEL, self.carried_velocity(axis));
+        }
     }
 
     /// 程序化滚动到某处
@@ -893,6 +969,14 @@ impl Scroller {
     pub fn wheel(&mut self, axis: usize, delta: f32) {
         self.seek = None;
         self.phys.wheel(axis, delta);
+    }
+
+    /// 滚轮的精确位移，见 [`Physics::precise_wheel`]
+    pub fn precise_wheel(&mut self, axis: usize, delta: f32) {
+        self.seek = None;
+        let before = self.phys.offset[axis];
+        self.phys.precise_wheel(axis, delta);
+        self.input[axis] += self.phys.offset[axis] - before;
     }
 
     /// 程序化滚动到某处（滚到第几行的请求之后再记下 `seek`）

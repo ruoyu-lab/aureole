@@ -202,6 +202,18 @@ type PlatformEventHook = Box<dyn Fn(&PlatformEvent)>;
 type FrameHook = Box<dyn Fn(&FrameInfo)>;
 type ExitHook = Box<dyn FnOnce()>;
 
+thread_local! {
+    /// 应用运行中挂的退出钩子（[`at_exit`]）
+    static RUNNING_EXIT: RefCell<Vec<ExitHook>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 应用运行中挂一个退出钩子：和 [`crate::App::on_exit`] 一样在应用退出前（主线程上）调用一次，排在 `App` 上挂的后面。
+/// 给用到时才启动的东西用（内嵌的 CEF 内核第一次用到时才启动，那时应用早就建好了）。在主线程上调用；
+/// 退出的钩子里再挂的也会调用
+pub fn at_exit(handler: impl FnOnce() + 'static) {
+    RUNNING_EXIT.with_borrow_mut(|hooks| hooks.push(Box::new(handler)));
+}
+
 /// 应用的钩子：插件和应用在 [`App`] 上挂的，事件循环开始后交给运行时
 #[derive(Default)]
 pub(crate) struct Hooks {
@@ -245,5 +257,13 @@ impl Hooks {
     pub(crate) fn exit(&self) {
         let hooks = std::mem::take(&mut *self.exit.borrow_mut());
         hooks.into_iter().for_each(|hook| hook());
+        // 运行中挂的：钩子里还可能再挂，取到空为止
+        loop {
+            let hooks = RUNNING_EXIT.with_borrow_mut(std::mem::take);
+            if hooks.is_empty() {
+                break;
+            }
+            hooks.into_iter().for_each(|hook| hook());
+        }
     }
 }

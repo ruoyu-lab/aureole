@@ -53,6 +53,8 @@ pub(crate) struct Scrolls {
     reported: Vec<(NodeId, [f32; 2])>,
     /// 手指正拖着滚动
     pan: Option<Pan>,
+    /// 句柄要求滚进视口的元素（是否带动画）：定位之后执行
+    reveals: Vec<(NodeId, bool)>,
 }
 
 /// 手指拖动要滚的东西
@@ -85,6 +87,8 @@ struct Gesture {
     target: Option<(NodeId, [bool; 2])>,
     /// 滚轮（和没有阶段的位移）锁定的视口：(视口, 方向, 主方向, 最近一次的时间)
     wheel: Option<(NodeId, [bool; 2], usize, f64)>,
+    /// 按住 Control 转滚轮的缩放（平台惯例）交给了捏合，还没结束：松开 Control 时结束
+    zooming: bool,
 }
 
 /// 触控板手势进行到哪一步
@@ -244,8 +248,24 @@ pub fn adopt_scrolls(tree: &TreeRef) {
     flush(tree);
 }
 
-/// 滚轮和触控板事件：先交给指针下最内层的元素冒泡（`on_wheel`），没被取消 `SCROLL` 时再交给视口滚动
+/// 按住 Control 转滚轮缩放时，一格放大（缩小）这么多（捏合的比例，0.1 是 10%）
+const ZOOM_PER_NOTCH: f32 = 0.1;
+
+/// 滚轮和触控板事件：先交给指针下最内层的元素冒泡（`on_wheel`），没被取消 `SCROLL` 时再交给视口滚动。
+/// 按平台惯例（[`crate::Conventions`]）：
+/// - 按住 Shift 转滚轮是横着滚：处理器收到的就是横着的位移，和 macOS 的系统替应用换好的一样；
+/// - 按住 Control 转滚轮是缩放（Windows，精确式触控板的双指捏合也这样报来）：视口不滚，换成捏合交给指针下的元素
+///   （往上滚放大，一格 [`ZOOM_PER_NOTCH`]），松开 Control 时这次捏合结束（[`wheel_modifiers`]）。
+///   `on_wheel` 里自己按 Control 缩放的取消 `SCROLL`，就不再换成捏合
 pub(crate) fn wheel(tree: &TreeRef, delta: WheelDelta, phase: GesturePhase, modifiers: Modifiers) {
+    let conventions = crate::system::conventions();
+    let zoom = conventions.control_wheel_zooms && modifiers.has_control() && matches!(delta, WheelDelta::Lines(_));
+    let delta = match delta {
+        WheelDelta::Lines([x, y]) if x == 0.0 && !zoom && conventions.shift_wheel_scrolls_horizontally && modifiers.has_shift() => {
+            WheelDelta::Lines([y, 0.0])
+        }
+        delta => delta,
+    };
     let routed = {
         let mut t = tree.borrow_mut();
         t.wheel_event(delta, phase, modifiers)
@@ -257,8 +277,32 @@ pub(crate) fn wheel(tree: &TreeRef, delta: WheelDelta, phase: GesturePhase, modi
         }
         None => false,
     };
-    if !prevented {
-        tree.borrow_mut().wheel(delta, phase);
+    if prevented {
+        return;
+    }
+    if zoom {
+        if let WheelDelta::Lines([_, y]) = delta
+            && y != 0.0
+        {
+            // 捏合的开始不带变化：第一格要在开始之后再交
+            if !mem::replace(&mut tree.borrow_mut().scrolls.gesture.zooming, true) {
+                super::pinch(tree, 0.0, GesturePhase::Start);
+            }
+            super::pinch(tree, -y * ZOOM_PER_NOTCH, GesturePhase::Move);
+        }
+        return;
+    }
+    tree.borrow_mut().wheel(delta, phase);
+}
+
+/// 修饰键变了：按住 Control 转滚轮的缩放在松开 Control 时结束（交给捏合的结束）
+pub(crate) fn wheel_modifiers(tree: &TreeRef, modifiers: Modifiers) {
+    if modifiers.has_control() {
+        return;
+    }
+    let zooming = mem::take(&mut tree.borrow_mut().scrolls.gesture.zooming);
+    if zooming {
+        super::pinch(tree, 0.0, GesturePhase::End);
     }
 }
 
@@ -500,9 +544,9 @@ impl Tree {
         }
     }
 
-    /// 没有视口在动、也没有改过的状态要交给渲染线程
+    /// 没有视口在动、也没有改过的状态要交给渲染线程（也没有等着滚进视口的元素）
     pub(super) fn scrolls_idle(&self) -> bool {
-        self.scrolls.awake.is_empty() && self.scrolls.dirty.is_empty()
+        self.scrolls.awake.is_empty() && self.scrolls.dirty.is_empty() && self.scrolls.reveals.is_empty()
     }
 
     /// 帧与帧之间改过的视口：整份物理状态交给渲染线程
@@ -782,12 +826,22 @@ impl Tree {
     fn wheel(&mut self, delta: WheelDelta, phase: GesturePhase) {
         let now = crate::timer::now();
         match delta {
+            // 一格滚多远按系统设置（可能是一屏）。整格平滑过去；不足一格的（精确式触控板、高分辨率滚轮）直接跟着走，
+            // 不然手指停了内容还在追
             WheelDelta::Lines(lines) => {
-                let delta = [lines[0] * scroll::line(), lines[1] * scroll::line()];
+                let conventions = crate::system::conventions();
+                let notch = conventions.wheel_notch;
+                let delta = [lines[0] * notch[0], lines[1] * notch[1]];
                 let Some((id, mask)) = self.route_latched(delta, now) else { return };
+                let precise = conventions.fractional_wheel_is_precise && lines.iter().any(|l| l.fract() != 0.0);
                 if let Some(s) = self.scroller_mut(id) {
                     for axis in (0..2).filter(|&a| mask[a] && delta[a] != 0.0) {
-                        s.wheel(axis, delta[axis]);
+                        let distance = if conventions.wheel_scrolls_pages { lines[axis] * scroll::page(s.metrics.viewport[axis]) } else { delta[axis] };
+                        if precise {
+                            s.precise_wheel(axis, distance);
+                        } else {
+                            s.wheel(axis, distance);
+                        }
                     }
                 }
                 self.wake(id);
@@ -1149,7 +1203,7 @@ impl Tree {
             if !s.axes[axis] || s.max[axis] <= 0.0 {
                 continue;
             }
-            let page = (s.metrics.viewport[axis] - scroll::line()).max(scroll::line());
+            let page = scroll::page(s.metrics.viewport[axis]);
             match action {
                 KeyScroll::Line(sign) => s.wheel(axis, sign * scroll::line()),
                 KeyScroll::Page(sign) => s.wheel(axis, sign * page),
@@ -1160,6 +1214,20 @@ impl Tree {
             return true;
         }
         false
+    }
+
+    /// 元素的句柄要求滚进视口：记下，这一帧定位之后执行（[`Self::run_reveals`]）
+    pub(super) fn request_reveal(&mut self, id: NodeId, animated: bool) {
+        self.scrolls.reveals.push((id, animated));
+    }
+
+    /// 定位之后：句柄要求的元素滚进视口（用这一帧的布局：刚挂上、刚改过的元素也在新的位置上）
+    pub(super) fn run_reveals(&mut self) {
+        for (id, animated) in mem::take(&mut self.scrolls.reveals) {
+            if self.nodes.get(id).is_some_and(|node| !node.exiting) {
+                self.scroll_into_view(id, animated);
+            }
+        }
     }
 
     /// 键盘把焦点移到滚动视口里看不见的元素上：由内到外，每个视口滚到正好露出它（四周留一点）。

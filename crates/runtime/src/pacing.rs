@@ -70,13 +70,10 @@ impl FramePacer {
         Self { clock: Some(clock), state, frame: run }
     }
 
-    /// 不等时钟，现在就出一帧（窗口刚改了大小：这一帧要和窗口的新大小一起生效）。
-    /// 正在出帧（帧里面引起的）时什么也不做，返回 `false`
-    pub(crate) fn frame_now(&self) -> bool {
-        let Ok(mut frame) = self.frame.try_borrow_mut() else { return false };
-        let now = monotonic_time();
-        frame(FrameTime { timestamp: now, target: now });
-        true
+    /// 不等时钟、现在就出一帧的句柄（[`FrameNow::run`]）：窗口改了大小，这一帧要和窗口的新大小一起生效。
+    /// 不借着 `FramePacer`，窗口过程的回调里也能用（窗口的大小真正变之前）
+    pub(crate) fn frame_now_handle(&self) -> FrameNow {
+        FrameNow { frame: self.frame.clone() }
     }
 
     /// 有事了（输入、定时器、任务、后台的消息之后界面可能要变）：空闲计数清零，暂停着的时钟恢复
@@ -89,6 +86,13 @@ impl FramePacer {
             && clock.is_paused()
         {
             clock.set_paused(false);
+        }
+    }
+
+    /// 换一个要的帧率（低电量模式开了、关了）：下一帧起按它出
+    pub(crate) fn set_rate_hint(&self, range: platform::FrameRateRange) {
+        if let Some(clock) = &self.clock {
+            clock.set_rate_hint(range);
         }
     }
 
@@ -139,6 +143,22 @@ impl FramePacer {
         if let Some(clock) = self.clock.take() {
             clock.set_paused(true);
         }
+    }
+}
+
+/// 现在就出一帧的句柄，见 [`FramePacer::frame_now_handle`]
+#[derive(Clone)]
+pub(crate) struct FrameNow {
+    frame: Rc<RefCell<dyn FnMut(FrameTime)>>,
+}
+
+impl FrameNow {
+    /// 现在就出一帧。正在出帧（帧里面引起的）时什么也不做，返回 `false`
+    pub(crate) fn run(&self) -> bool {
+        let Ok(mut frame) = self.frame.try_borrow_mut() else { return false };
+        let now = monotonic_time();
+        frame(FrameTime { timestamp: now, target: now });
+        true
     }
 }
 

@@ -15,18 +15,29 @@
 // 库里只用 `tracing` 报告情况，不直接往终端写（测试、示例、演示、工具 crate 不受这条限制）
 #![cfg_attr(not(test), deny(clippy::print_stdout, clippy::print_stderr))]
 
+#[cfg(target_os = "windows")]
+mod display;
 mod alert;
 mod backend;
 pub mod clipboard;
 #[cfg(target_os = "macos")]
 mod drag;
+// Windows 的拖到应用外面（`DoDragDrop`），和 macOS 的同名同接口
+#[cfg(target_os = "windows")]
+#[path = "drag/windows.rs"]
+mod drag;
 pub mod external_drag;
+pub mod print;
 pub mod frame;
 pub mod headless;
 pub mod single_instance;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod live_resize;
 mod menu;
+#[cfg(target_os = "windows")]
+mod modal;
 mod native;
 pub mod open;
 pub mod process;
@@ -41,11 +52,13 @@ pub use title_bar::{OnTitleBarChange, ResizeEdge, TitleBar, TitleBarAction, Titl
 pub use backend::{
     AppearanceService, Capabilities, ClipboardService, CompositionTarget, Conventions, DialogService, EnvironmentService,
     SingleInstanceService, LineEdgeKeys, MenuEntry, MenuItemId, MenuItemModel, MenuItemUpdate, MenuModel, MenuService, ModifierKey,
-    NotificationRequest, NotificationResponse, NotificationService, OnMenuItem, OnNotificationResponse, OnTrayClick, PlatformBackend, PlatformError, PlatformWindow, RedoKeys, ShellService,
+    NotificationRequest, NotificationResponse, NotificationService, OnLiveResize, OnMenuItem, OnNotificationResponse, OnTrayClick, PlatformBackend, PlatformError, PlatformWindow, RedoKeys, ShellService,
     SubmenuModel, TrayIconFormat, TrayImage, TrayModel, TrayService, WindowService,
 };
 pub use frame::{FrameClock, FrameClockKind, FrameClockOptions, FrameRateRange, FrameTime, PresentFeedback, monotonic_time};
 pub use clipboard::{ClipFormat, ClipboardContent, RgbaImage};
+pub use external_drag::accept_custom_format;
+pub use print::{PrintDialogDone, PrintDone, PrintSetup};
 pub use external_drag::{ExternalDataKinds, ExternalDrag, ExternalDropData, ExternalDropEffect, OnExternalDrag};
 pub use native::{NativeBackend, native, set_thread_backend, with_backend};
 
@@ -68,6 +81,15 @@ impl DisplayColor {
     pub fn is_capable(&self) -> bool {
         self.wide_gamut || self.potential_headroom > 1.0
     }
+}
+
+/// 驱动某个显示器的 GPU：PCI 的厂商号、设备号（和图形接口报告的适配器对得上）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayAdapter {
+    /// PCI 厂商号
+    pub vendor: u32,
+    /// PCI 设备号
+    pub device: u32,
 }
 
 impl Default for DisplayColor {
@@ -120,15 +142,16 @@ impl DisplayLink {
     }
 }
 
-/// 系统是否开着低电量模式。开着时 ProMotion 屏上的窗口画面会被限制在 60fps，即使显示器和显示链接都在 120Hz。
-/// macOS 以外总是 `false`
+/// 系统是否开着低电量模式。macOS 上开着时 ProMotion 屏上的窗口画面会被限制在 60fps，即使显示器和显示链接都在 120Hz；
+/// Windows 上是节电模式（用电池、电量低于设定时系统打开，也可以手动打开）。Linux 总是 `false`
 pub fn is_low_power_mode() -> bool {
     native().environment().is_low_power_mode()
 }
 
-/// 窗口所在显示器的颜色能力：能不能显示 Display P3，此刻和最多能比 SDR 白亮几倍（EDR 的余量）。
-/// 只在 macOS 的主线程上、窗口在某个显示器上时有结果。窗口挪到另一个显示器、调亮度时会变，调用方隔一会儿再问一次；
-/// 其他平台是 `None`，调用方按普通显示器（sRGB、没有余量）处理
+/// 窗口所在显示器的颜色能力：能不能显示广色域，此刻和最多能比 SDR 白亮几倍（余量）。
+/// macOS 上在主线程、窗口在某个显示器上时有结果（EDR）；Windows 上看系统给这台显示器开没开 HDR，开着时余量是显示器的最高亮度比
+/// 系统设置里 SDR 内容的亮度，没开时是普通显示器。窗口挪到另一个显示器、调亮度时会变，调用方隔一会儿再问一次；
+/// Linux 是 `None`，调用方按普通显示器（sRGB、没有余量）处理
 pub fn display_color(window: &impl HasWindowHandle) -> Option<DisplayColor> {
     native().window().display_color(window)
 }
@@ -169,26 +192,21 @@ pub fn is_secure_input_enabled() -> bool {
     native().window().is_secure_input_enabled()
 }
 
-/// 把窗口带到最前面：取消隐藏应用、激活应用、还原最小化、成为主窗口。只在 macOS 的主线程上有效，返回是否做了；
-/// 其他平台返回 `false`，调用方用窗口库的办法（还原最小化、聚焦）
+/// 把窗口带到最前面：取消隐藏应用、激活应用、还原最小化、成为主窗口，返回是否做了。macOS 上只在主线程上有效；
+/// Windows 上还原最小化、放到前面，系统不让抢前台时任务栏按钮闪一下；Linux 返回 `false`，调用方用窗口库的办法（还原最小化、聚焦）
 pub fn bring_to_front(window: &impl HasWindowHandle) -> bool {
     native().window().bring_to_front(window).is_ok()
 }
 
 /// 指针此刻在窗口内容区里的位置（逻辑像素，左上角为原点），也可能在窗口外（负数或超出大小）。
-/// 拖放文件时窗口收不到指针移动事件，用它找出文件落在哪个元素上。macOS 以外是 `None`：调用方退回到最后已知的指针位置
+/// 拖放文件时窗口收不到指针移动事件，用它找出文件落在哪个元素上。macOS、Windows 有；Linux 是 `None`：调用方退回到最后已知的指针位置
 pub fn pointer_position(window: &impl HasWindowHandle) -> Option<[f32; 2]> {
     native().window().pointer_position(window)
 }
 
-/// 开始把文件或文字拖到应用外面（macOS），开始了返回 `true`，结束时调用 `on_end`（是否放下了）。
-/// 其他平台还没实现：什么都不做，返回 `false`（不调用 `on_end`）
-pub fn begin_drag_out(
-    window: &impl HasWindowHandle,
-    files: &[PathBuf],
-    text: Option<&str>,
-    at: [f32; 2],
-    on_end: Box<dyn FnOnce(bool)>,
-) -> bool {
-    native().window().begin_drag_out(window, files, text, at, on_end).is_ok()
+/// 开始把内容（文件、文字、带格式的文字、图片、应用自己定的格式）拖到应用外面（macOS、Windows），开始了返回 `true`，
+/// 结束时调用 `on_end`（是否放下了）。内容可以是空的：只有这个进程自己的窗口认得
+/// （[`external_drag::ExternalDataKinds::own`]）。Linux 还没实现：什么都不做，返回 `false`（不调用 `on_end`）
+pub fn begin_drag_out(window: &impl HasWindowHandle, content: &ClipboardContent, at: [f32; 2], on_end: Box<dyn FnOnce(bool)>) -> bool {
+    native().window().begin_drag_out(window, content, at, on_end).is_ok()
 }

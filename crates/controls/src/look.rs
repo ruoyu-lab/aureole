@@ -67,6 +67,13 @@ pub(crate) struct Look {
     pub file_button: Style,
     pub file_label: Style,
     pub file_clear: Style,
+    pub table: Style,
+    pub table_header: Style,
+    pub table_divider: Style,
+    pub table_header_cell: Style,
+    pub table_row: Style,
+    pub table_cell: Style,
+    pub table_resizer: Style,
 }
 
 thread_local! {
@@ -324,6 +331,36 @@ impl Look {
                 .color(tone(|p| p.muted))
                 .hovered(|s| s.background(tone(|p| p.fill)))
                 .pressed(|s| s.background(tone(|p| p.fill_pressed))),
+            table: dim()
+                .width(pct(100))
+                .height(320)
+                .radius(RADIUS)
+                .background(tone(|p| p.surface))
+                .border(1, tone(|p| p.line))
+                .color(tone(|p| p.text))
+                .font_size(14)
+                .padding(1)
+                .clip(true),
+            table_header: Style::new().height(32).font_size(13).font_weight(600.0),
+            table_divider: Style::new().height(1).shrink(0).background(tone(|p| p.line)),
+            table_header_cell: Style::new()
+                .height(pct(100))
+                .padding_x(10)
+                .color(tone(|p| p.muted))
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
+                .selected(|s| s.color(tone(|p| p.text))),
+            table_row: Style::new()
+                .hovered(|s| s.background(tone(|p| p.fill)))
+                .pressed(|s| s.background(tone(|p| p.fill_pressed)))
+                .focused(|s| s.border(1, tone(|p| p.accent)))
+                .selected(|s| {
+                    s.background(tone(|p| p.accent_soft))
+                        .hovered(|s| s.background(tone(|p| p.accent_soft)))
+                        .pressed(|s| s.background(tone(|p| p.accent_soft_pressed)))
+                }),
+            table_cell: Style::new().padding_x(10),
+            table_resizer: Style::new().width(6).hovered(|s| s.background(tone(|p| p.border))).pressed(|s| s.background(tone(|p| p.accent))),
             number: field
                 .height(HEIGHT)
                 .padding(1)

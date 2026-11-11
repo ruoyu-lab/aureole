@@ -5,6 +5,10 @@
 //! 拖的时候不重新布局、不重画；源元素自己变淡（它的层的透明度）。抬起（[`DragPreview::Lift`]）是源元素自己的合成层
 //! 加一个额外平移（和滚动偏移同一个字段），叠在兄弟上面。两种都按开始拖时源元素的设置限制位移（只沿一个方向、不出父元素），
 //! 在父元素坐标里算；找放置目标、自动滚动只看指针。
+//!
+//! 拖着元素出了窗口、指针下面是同一个应用的另一个窗口时（窗口宿主问 [`crate::host::HostWindow::app_window_at`]），
+//! 和拖到应用外面一样交给系统，请求带着这份数据（[`DragOutRequest::data`]）；那个窗口（包括交给系统以后又回到的这个窗口）
+//! 把系统的拖放换成这里的"来访"（[`visit_over`] 这几个）：找目标、进入、经过、离开、放下和窗口里的一样，只是没有影子。
 
 use std::any::Any;
 use std::cell::Cell;
@@ -57,12 +61,19 @@ pub(crate) struct DragDropState {
     out_source: Option<(NodeId, Rc<Cell<Option<bool>>>)>,
     /// 借用树时没法调用、留到这一帧结束的离开处理器（源元素在拖的时候被卸载了）
     deferred: Vec<(On<DropEvent>, DropEvent)>,
+    /// 同一个应用的窗口交给系统的元素之间拖放正经过这个窗口
+    visit: Option<Box<Visit>>,
 }
 
 impl DragDropState {
     /// 正在元素之间拖放
     pub fn dragging(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// 正在元素之间拖放时拖着的数据
+    pub fn data(&self) -> Option<Rc<dyn Any>> {
+        self.session.as_ref().map(|s| s.data.clone())
     }
 
     /// 用影子拖、影子还在（拖动中或者正在落）：源元素（变淡，并且在最上面再画一遍）
@@ -102,6 +113,11 @@ impl DragDropState {
             None
         }
     }
+
+    /// 窗口里的拖放（`visit` 为假）或者来访的此刻落在哪
+    fn hover_of(&mut self, visit: bool) -> Option<&mut Hover> {
+        if visit { self.visit.as_deref_mut().map(|v| &mut v.hover) } else { self.session.as_deref_mut().map(|s| &mut s.hover) }
+    }
 }
 
 /// 进行中的元素之间的拖放
@@ -110,16 +126,30 @@ pub(crate) struct Session {
     data: Rc<dyn Any>,
     /// 指针相对源元素左上角（窗口坐标）的偏移
     grab: [f32; 2],
-    /// 接收这份数据、指针在它上面的元素
-    target: Option<NodeId>,
-    /// 上次交给目标的位置（目标自己的坐标）
-    over: Option<[f32; 2]>,
+    hover: Hover,
     /// 源元素也能拖到应用外面：拖出窗口时交给系统
     out: bool,
     /// 影子、抬起的元素只沿这个方向走（属性 `drag_preview_axis`）
     axis: Option<Direction>,
     /// 影子、抬起的元素不出父元素（属性 `drag_preview_contained`）
     contained: bool,
+}
+
+/// 拖着的数据此刻落在哪个目标上
+#[derive(Default)]
+struct Hover {
+    /// 接收这份数据、指针在它上面的元素
+    target: Option<NodeId>,
+    /// 上次交给目标的位置（目标自己的坐标）
+    over: Option<[f32; 2]>,
+}
+
+/// 来访：同一个应用的窗口交给系统的元素之间拖放（[`DragOutRequest::data`]）正经过这个窗口
+struct Visit {
+    data: Rc<dyn Any>,
+    /// 指针上次的位置（窗口坐标）
+    point: [f32; 2],
+    hover: Hover,
 }
 
 /// 影子：源元素的子树在最上面的合成层里再画一遍
@@ -204,6 +234,9 @@ pub struct DragOutRequest {
     pub at: [f32; 2],
     /// 系统的会话结束时把有没有被接住写进来，下一帧交给源元素
     pub result: Rc<Cell<Option<bool>>>,
+    /// 从元素之间的拖放交给系统时（拖出了窗口）是拖着的数据：拖到同一个应用的窗口上时，宿主交给那个窗口的
+    /// [`crate::host::WindowTree::element_drag_over`] 这几个，那里的元素按元素之间的拖放接收。`out` 这时可以是空的
+    pub data: Option<Rc<dyn Any>>,
 }
 
 /// 开始拖（越过阈值时）：取数据，准备影子或抬起元素
@@ -246,54 +279,60 @@ pub(super) fn start(tree: &TreeRef, node: NodeId, press: [f32; 2]) {
         DragPreview::None => {}
     }
     let out = spec.drag_out.is_some();
-    let session = Session { source: node, data, grab: sub(press, origin), target: None, over: None, out, axis, contained };
+    let session = Session { source: node, data, grab: sub(press, origin), hover: Hover::default(), out, axis, contained };
     t.drag_drop.session = Some(Box::new(session));
 }
 
 /// 指针移动了（或者内容在指针下滚过去了）：影子、抬起的元素跟着走，找放置目标，交给它进入、经过、离开。
 /// 返回 `true` 表示拖出了窗口、源元素能拖到应用外面，要交给系统
 pub(super) fn update(tree: &TreeRef) -> bool {
-    let (candidates, data, point) = {
+    let (data, point, source) = {
         let mut t = tree.borrow_mut();
         let Some(point) = t.router.pointer() else { return false };
         let Some(session) = t.drag_drop.session.as_deref() else { return false };
-        let [w, h] = t.layout.viewport();
-        if session.out && (point[0] < 0.0 || point[1] < 0.0 || point[0] >= w || point[1] >= h) {
+        if session.out && t.outside(point) {
             return true;
         }
         let (source, data) = (session.source, session.data.clone());
         t.follow(point);
+        (data, point, source)
+    };
+    hover(tree, point, &data, Some(source), false);
+    false
+}
+
+/// 拖着 `data` 经过 `point`（窗口坐标）：找放置目标（从内到外第一个接收这份数据的；`source` 自己和子孙不算），
+/// 交给它进入、经过，交给原来的目标离开。`visit` 说的是来访（[`Visit`]）还是窗口里的拖放。返回有没有目标
+fn hover(tree: &TreeRef, point: [f32; 2], data: &Rc<dyn Any>, source: Option<NodeId>, visit: bool) -> bool {
+    let candidates: Vec<(NodeId, Rc<DragDropSpec>)> = {
+        let mut t = tree.borrow_mut();
         t.refresh_worlds();
         let path = t.hit_path(point);
-        // 从内到外有放置设置的元素；源元素自己和子孙不算
-        let candidates: Vec<(NodeId, Rc<DragDropSpec>)> = path
-            .iter()
+        // 从内到外有放置设置的元素
+        path.iter()
             .rev()
-            .filter(|&&id| !t.nodes.is_within(id, source) && !t.disabled(id))
+            .filter(|&&id| source.is_none_or(|source| !t.nodes.is_within(id, source)) && !t.disabled(id))
             .filter_map(|&id| t.node_input(id)?.drag_drop().cloned().filter(|spec| spec.is_target()).map(|spec| (id, spec)))
-            .collect();
-        (candidates, data, point)
+            .collect()
     };
     // 接收条件是用户代码，在借用树之外调用
-    let target = untracked(|| candidates.iter().find(|(_, spec)| spec.accepts(&*data)).map(|(id, spec)| (*id, spec.clone())));
+    let target = untracked(|| candidates.iter().find(|(_, spec)| spec.accepts(&**data)).map(|(id, _)| *id));
     let calls = {
         let mut t = tree.borrow_mut();
-        let local = target.as_ref().map(|(id, _)| t.local_point(*id, point));
+        let local = target.map(|id| t.local_point(id, point));
         let modifiers = t.router.modifiers();
-        let previous = t.drag_drop.session.as_deref().and_then(|s| s.target);
+        let Some(previous) = t.drag_drop.hover_of(visit).map(|h| h.target) else { return false };
         let leave = match previous {
-            Some(old) if Some(old) != target.as_ref().map(|(id, _)| *id) => t.leave_calls(old, &data),
+            Some(old) if Some(old) != target => t.leave_calls(old, data, point),
             _ => Vec::new(),
         };
-        let Some(session) = t.drag_drop.session.as_deref_mut() else { return false };
-        let entered = target.as_ref().map(|(id, _)| *id) != previous;
-        let moved = local != session.over;
-        session.target = target.as_ref().map(|(id, _)| *id);
-        session.over = local;
+        let Some(hover) = t.drag_drop.hover_of(visit) else { return false };
+        let entered = target != previous;
+        let moved = local != hover.over;
+        hover.target = target;
+        hover.over = local;
         let event = local.map(|position| DropEvent { position, window_position: point, modifiers, data: data.clone() });
-        let handlers = target.map(|(id, _)| {
-            (t.handlers_of(id, EventType::DragEnter, Handler::drop_event), t.handlers_of(id, EventType::DragOver, Handler::drop_event))
-        });
+        let handlers = target.map(|id| (t.handlers_of(id, EventType::DragEnter, Handler::drop_event), t.handlers_of(id, EventType::DragOver, Handler::drop_event)));
         (leave, entered, moved, event, handlers)
     };
     let (leave, entered, moved, event, handlers) = calls;
@@ -308,7 +347,20 @@ pub(super) fn update(tree: &TreeRef) -> bool {
             }
         }
     });
-    false
+    target.is_some()
+}
+
+/// 放下的处理器：目标的 on_drop（类型对得上的），接着是 on_drag_leave
+type DropCalls = (Vec<On<DropEvent>>, Vec<On<DropEvent>>, DropEvent);
+
+/// 交给目标放下的处理器，返回有没有被接住
+fn run_drop(call: Option<DropCalls>) -> bool {
+    let Some((drops, leave, event)) = call else { return false };
+    batch(|| {
+        drops.iter().for_each(|h| h(&event));
+        leave.iter().for_each(|h| h(&event));
+    });
+    true
 }
 
 /// 松开：交给目标的 on_drop，接着是 on_drag_leave；影子落到位（或飞回去），抬起的元素落下。返回有没有被接住
@@ -316,33 +368,12 @@ pub(super) fn drop_on_target(tree: &TreeRef) -> bool {
     let call = {
         let mut t = tree.borrow_mut();
         let Some(session) = t.drag_drop.session.take() else { return false };
-        let target = session.target.filter(|&id| t.nodes.get(id).is_some_and(|n| !n.exiting));
-        let call = target.map(|id| {
-            let point = t.router.pointer().unwrap_or_default();
-            let event = DropEvent { position: t.local_point(id, point), window_position: point, modifiers: t.router.modifiers(), data: session.data.clone() };
-            let ty = (*event.data).type_id();
-            let drops: Vec<_> = t
-                .handlers(id)
-                .map(|h| {
-                    h.entries(EventType::Drop)
-                        .filter_map(|e| match &e.handler {
-                            Handler::TypedDrop(t, f) if *t == ty => Some(f.clone()),
-                            _ => None,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            (drops, t.handlers_of(id, EventType::DragLeave, Handler::drop_event), event)
-        });
+        let point = t.router.pointer().unwrap_or_default();
+        let call = t.drop_calls(session.hover.target, &session.data, point);
         t.end_preview();
         call
     };
-    let Some((drops, leave, event)) = call else { return false };
-    batch(|| {
-        drops.iter().for_each(|h| h(&event));
-        leave.iter().for_each(|h| h(&event));
-    });
-    true
+    run_drop(call)
 }
 
 /// 取消（Esc、窗口失去焦点、拖出窗口交给系统）：目标收到离开；影子飞回去（交给系统时直接去掉）
@@ -355,24 +386,67 @@ pub(super) fn cancel(tree: &TreeRef, immediately: bool) {
         } else {
             t.end_preview();
         }
-        session.target.map(|id| t.leave_calls(id, &session.data)).unwrap_or_default()
+        let point = t.router.pointer().unwrap_or_default();
+        session.hover.target.map(|id| t.leave_calls(id, &session.data, point)).unwrap_or_default()
     };
     if !leave.is_empty() {
         batch(|| leave.iter().for_each(|(h, e)| h(e)));
     }
 }
 
-/// 拖到应用外面：取内容，等窗口交给系统；没有东西可拖时直接以 `false` 结束
-pub(super) fn begin_out(tree: &TreeRef, node: NodeId, at: [f32; 2]) {
+/// 交给系统：取拖到应用外面的内容，等窗口交给系统。`data` 是元素之间拖放的数据（从元素之间的拖放交过去时有），
+/// 拖到同一个应用的窗口上时那里按元素之间的拖放接收。什么都没有可拖时直接以 `false` 结束
+pub(super) fn begin_out(tree: &TreeRef, node: NodeId, at: [f32; 2], data: Option<Rc<dyn Any>>) {
     let Some(spec) = tree.borrow().node_input(node).and_then(|i| i.drag_drop().cloned()) else { return };
-    let Some(items) = spec.drag_out.clone() else { return };
-    let out = untracked(|| items()).existing();
-    if out.is_empty() {
+    let out = spec.drag_out.clone().map(|items| untracked(|| items()).existing()).unwrap_or_default();
+    if out.is_empty() && data.is_none() {
         let handlers = tree.borrow().handlers_of(node, EventType::DragOutEnd, Handler::flag);
         batch(|| handlers.iter().for_each(|h| h(false)));
         return;
     }
-    tree.borrow_mut().drag_drop.out = Some(DragOutRequest { node, out, at, result: Rc::default() });
+    tree.borrow_mut().drag_drop.out = Some(DragOutRequest { node, out, at, result: Rc::default(), data });
+}
+
+/// 来访的元素之间拖放（同一个应用的窗口交给系统的，见模块说明）经过 `point`（窗口坐标）：
+/// 找放置目标，交给它进入、经过、离开。换了一份数据时先结束上一次来访。返回有没有元素接收这份数据
+pub(crate) fn visit_over(tree: &TreeRef, point: [f32; 2], data: &Rc<dyn Any>) -> bool {
+    let same = tree.borrow().drag_drop.visit.as_ref().is_some_and(|v| Rc::ptr_eq(&v.data, data));
+    if !same {
+        visit_leave(tree);
+        tree.borrow_mut().drag_drop.visit = Some(Box::new(Visit { data: data.clone(), point, hover: Hover::default() }));
+    }
+    let source = {
+        let mut t = tree.borrow_mut();
+        if let Some(visit) = t.drag_drop.visit.as_deref_mut() {
+            visit.point = point;
+        }
+        // 交给系统以后回到了源元素的窗口：它自己和子孙不算（和窗口里一样）
+        t.drag_drop.out_source.as_ref().map(|(id, _)| *id)
+    };
+    hover(tree, point, data, source, true)
+}
+
+/// 来访的拖放离开了窗口（或者取消了）：目标收到离开
+pub(crate) fn visit_leave(tree: &TreeRef) {
+    let leave = {
+        let mut t = tree.borrow_mut();
+        let Some(visit) = t.drag_drop.visit.take() else { return };
+        visit.hover.target.map(|id| t.leave_calls(id, &visit.data, visit.point)).unwrap_or_default()
+    };
+    if !leave.is_empty() {
+        batch(|| leave.iter().for_each(|(h, e)| h(e)));
+    }
+}
+
+/// 来访的拖放在 `point` 放下：交给指针下接收这份数据的元素的 on_drop，接着是 on_drag_leave。返回有没有被接住
+pub(crate) fn visit_drop(tree: &TreeRef, point: [f32; 2], data: &Rc<dyn Any>) -> bool {
+    visit_over(tree, point, data);
+    let call = {
+        let mut t = tree.borrow_mut();
+        let Some(visit) = t.drag_drop.visit.take() else { return false };
+        t.drop_calls(visit.hover.target, &visit.data, point)
+    };
+    run_drop(call)
 }
 
 /// 拖到应用外面结束了（系统的会话结束、平台不支持、测试工具模拟）：交给源元素的 on_drag_out_end
@@ -565,32 +639,64 @@ impl Tree {
         self.paint.invalidate();
     }
 
-    /// 拖着的数据离开 `target`：它的 `on_drag_leave` 和事件（位置是指针此刻在它上面的坐标）
-    fn leave_calls(&self, target: NodeId, data: &Rc<dyn Any>) -> Vec<(On<DropEvent>, DropEvent)> {
+    /// 拖着的数据离开 `target`：它的 `on_drag_leave` 和事件（位置是指针 `point` 在它上面的坐标）
+    fn leave_calls(&self, target: NodeId, data: &Rc<dyn Any>, point: [f32; 2]) -> Vec<(On<DropEvent>, DropEvent)> {
         let handlers = self.handlers_of(target, EventType::DragLeave, Handler::drop_event);
         if handlers.is_empty() {
             return Vec::new();
         }
-        let point = self.router.pointer().unwrap_or_default();
         let event = DropEvent { position: self.local_point(target, point), window_position: point, modifiers: self.router.modifiers(), data: data.clone() };
         handlers.into_iter().map(|h| (h, event.clone())).collect()
+    }
+
+    /// 在 `target`（还在、没在退场）上放下 `data`：它类型对得上的 `on_drop` 和 `on_drag_leave`，指针在 `point`
+    fn drop_calls(&self, target: Option<NodeId>, data: &Rc<dyn Any>, point: [f32; 2]) -> Option<DropCalls> {
+        let id = target.filter(|&id| self.nodes.get(id).is_some_and(|n| !n.exiting))?;
+        let event = DropEvent { position: self.local_point(id, point), window_position: point, modifiers: self.router.modifiers(), data: data.clone() };
+        let ty = (*event.data).type_id();
+        let drops: Vec<_> = self
+            .handlers(id)
+            .map(|h| {
+                h.entries(EventType::Drop)
+                    .filter_map(|e| match &e.handler {
+                        Handler::TypedDrop(t, f) if *t == ty => Some(f.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((drops, self.handlers_of(id, EventType::DragLeave, Handler::drop_event), event))
+    }
+
+    /// 指针在窗口外面
+    fn outside(&self, point: [f32; 2]) -> bool {
+        let [w, h] = self.layout.viewport();
+        point[0] < 0.0 || point[1] < 0.0 || point[0] >= w || point[1] >= h
+    }
+
+    /// 正在元素之间拖放、指针出了窗口：指针的位置（窗口坐标）。窗口宿主问这里是不是同一个应用的另一个窗口
+    pub(crate) fn drag_outside(&self) -> Option<[f32; 2]> {
+        self.drag_drop.session.as_ref()?;
+        self.router.pointer().filter(|&point| self.outside(point))
     }
 
     /// 节点开始退场或被卸载（在借用树时）：源元素没了就结束拖放（目标的离开处理器留到这一帧结束），
     /// 目标没了就不再是目标
     pub(super) fn forget_drag_drop(&mut self, leave: Leave) {
         let gone = |t: &Tree, id: NodeId| leave.gone(&t.nodes, id);
-        let target = self.drag_drop.session.as_ref().and_then(|s| s.target);
-        if target.is_some_and(|t| gone(self, t))
-            && let Some(session) = self.drag_drop.session.as_deref_mut()
-        {
-            session.target = None;
-            session.over = None;
+        for visit in [false, true] {
+            let target = self.drag_drop.hover_of(visit).and_then(|h| h.target);
+            if target.is_some_and(|t| gone(self, t))
+                && let Some(hover) = self.drag_drop.hover_of(visit)
+            {
+                *hover = Hover::default();
+            }
         }
         if let Some(session) = self.drag_drop.session.as_deref()
             && gone(self, session.source)
         {
-            let leave = session.target.map(|id| self.leave_calls(id, &session.data)).unwrap_or_default();
+            let point = self.router.pointer().unwrap_or_default();
+            let leave = session.hover.target.map(|id| self.leave_calls(id, &session.data, point)).unwrap_or_default();
             self.drag_drop.deferred.extend(leave);
             self.drag_drop.session = None;
             self.router.set_drag(None);

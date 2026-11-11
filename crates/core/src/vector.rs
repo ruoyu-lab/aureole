@@ -336,6 +336,34 @@ pub(crate) struct PathBlock {
 }
 
 impl PathBlock {
+    /// 元素坐标里的一点落在画出来的路径上吗（按形状判断点击），`content` 是内容区（元素坐标）。
+    /// 画布到元素的对应和画的时候一样；填充时按填充规则看在不在里面（子路径自动闭合），描边时看离线条有没有线宽的一半近
+    /// （线宽是路径坐标里的）。描边只画一段（`stroke_range`）、虚线时仍按整条线判断；变形中按变形的终点判断
+    pub(crate) fn contains(&self, point: [f32; 2], content: Rect) -> bool {
+        let Some(path) = &self.path else { return false };
+        let [vx, vy, vw, vh] = path.canvas();
+        if vw <= 0.0 || vh <= 0.0 || content.width <= 0.0 || content.height <= 0.0 {
+            return false;
+        }
+        let (fit, origin) = match path.0.view_box {
+            Some(_) => {
+                let fit = (content.width / vw).min(content.height / vh);
+                (fit, [content.x + (content.width - vw * fit) * 0.5 - vx * fit, content.y + (content.height - vh * fit) * 0.5 - vy * fit])
+            }
+            None => (1.0, [content.x, content.y]),
+        };
+        let p = Point::new((point[0] - origin[0]) / fit, (point[1] - origin[1]) / fit);
+        // 展平的精度：屏幕上约四分之一个逻辑像素
+        let lines = flatten(&path.0.commands, 0.25 / fit);
+        match self.stroke {
+            Some(stroke) => {
+                let reach = stroke.width * 0.5;
+                lines.iter().any(|line| line.windows(2).any(|s| segment_distance(p, s[0], s[1]) <= reach))
+            }
+            None => winding(&lines, p, path.0.even_odd),
+        }
+    }
+
     /// 没指定大小时的大小：画布大小（描边时加上线宽）
     pub fn intrinsic(&self) -> [f32; 2] {
         let Some(path) = &self.path else { return [0.0; 2] };
@@ -489,6 +517,22 @@ impl Raster<'_> {
         };
         let Some(entry) = self.entry(key, path, block.stroke, scale, trim) else { return };
         quads.push(self.quad(entry, origin, world, ink));
+    }
+
+    /// 字符网格里画成路径的字（弧线、斜线）：`id` 是缓存键（内容一样时一样），`make` 第一次见到时才调，
+    /// `origin` 是格子左上角（行内坐标，对齐物理像素）
+    #[cfg(feature = "char-grid")]
+    pub fn cell_curve(&mut self, id: u64, make: impl FnOnce() -> (VectorPath, Stroke), origin: [f32; 2], color: scene::Color) -> Option<Quad> {
+        let key = PathKey { id, scale: self.scale.to_bits(), stroke: None, trim: [0.0f32.to_bits(), 1.0f32.to_bits()] };
+        let entry = match self.cache.entries.get(&key) {
+            Some(entry) => *entry,
+            None => {
+                let (path, stroke) = make();
+                self.entry(key, &path, Some(stroke), self.scale, [0.0, 1.0])
+            }
+        }?;
+        let (x, y) = ((origin[0] * self.scale).round() + entry.left as f32, (origin[1] * self.scale).round() + entry.top as f32);
+        Some(Quad::path(x / self.scale, y / self.scale, entry.width as f32 / self.scale, entry.height as f32 / self.scale, entry.uv, color))
     }
 
     /// 栅格化的结果放到布局坐标的 `origin`（路径坐标原点所在的位置），再经过元素的变换
@@ -904,6 +948,34 @@ fn flatten(commands: &[Command], tolerance: f32) -> Vec<Vec<Point>> {
         }
     }
     paths
+}
+
+/// 点在展平的路径（子路径自动闭合）里吗：非零环绕数；`even_odd` 时按奇偶（环绕数的奇偶就是穿过的次数的奇偶）
+fn winding(lines: &[Vec<Point>], p: Point, even_odd: bool) -> bool {
+    let side = |a: Point, b: Point| (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);
+    let mut winding = 0i32;
+    for line in lines.iter().filter(|line| line.len() >= 2) {
+        let closing = (line[line.len() - 1], line[0]);
+        for (a, b) in line.windows(2).map(|w| (w[0], w[1])).chain(std::iter::once(closing)) {
+            if a.y <= p.y {
+                if b.y > p.y && side(a, b) > 0.0 {
+                    winding += 1;
+                }
+            } else if b.y <= p.y && side(a, b) < 0.0 {
+                winding -= 1;
+            }
+        }
+    }
+    if even_odd { winding % 2 != 0 } else { winding != 0 }
+}
+
+/// 点到线段的距离
+fn segment_distance(p: Point, a: Point, b: Point) -> f32 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length = dx * dx + dy * dy;
+    let t = if length > 0.0 { (((p.x - a.x) * dx + (p.y - a.y) * dy) / length).clamp(0.0, 1.0) } else { 0.0 };
+    let (x, y) = (a.x + t * dx - p.x, a.y + t * dy - p.y);
+    (x * x + y * y).sqrt()
 }
 
 fn push_point(paths: &mut Vec<Vec<Point>>, current: Point, p: Point) {

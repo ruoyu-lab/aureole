@@ -4,7 +4,7 @@
 
 重点是**性能和动画**：画面不变时不做工作；变换、透明度、滚动在渲染线程上推进，主线程忙的时候也不掉帧；所有视觉属性都能做可打断的过渡。
 
-**现在是测试版（`0.0.1-beta.2`）**，API 还会改，欢迎试用和反馈。
+**现在是测试版（`0.0.1-beta.3`）**，API 还会改，欢迎试用和反馈。
 
 ## 安装
 
@@ -12,7 +12,7 @@
 
 ```toml
 [dependencies]
-aureole = "0.0.1-beta.2"
+aureole = "0.0.1-beta.3"
 ```
 
 ## 例子
@@ -53,8 +53,20 @@ fn main() {
 | 平台 | 状态 |
 |---|---|
 | macOS | 主要支持，在 Apple Silicon 上开发和验证 |
-| Windows | **实验性**：功能都写了；真机上开窗口、画字、自己画标题栏能用，别的还没逐项验证，可能有问题 |
+| Windows | 主要支持，Windows 10、11：在真机上（4K 150% 加 1080p 100% 两块显示器）验证过改窗口大小、拖动、自己画的标题栏、跟着显示器刷新的帧时钟、菜单栏、托盘、文件对话框、拖进拖出；通知、输入法、触控板还没逐项看过 |
 | Linux | **实验性**：功能都写了，还没在真实桌面上验证过，可能有问题（X11、Wayland） |
+
+## CEF 视图（试验性）
+
+`aureole-webview` 内嵌 CEF 内核，把它画的画面当成普通元素合成：圆角、透明度、变换、动画对它都有效，框架的菜单、弹窗能盖在上面。
+macOS、Windows 上能用、能用 `cargo bundle` 打包，同一份代码两边一样用；Linux 上能编译，还没在真机上跑过。
+编译时要下载内核（约 500 MB）、要 cmake 和 Ninja，所以它不在框架的工作区里，用到时单独依赖，见[它的说明](https://github.com/ruoyu-lab/aureole/blob/master/crates/webview/README.md)。
+
+```toml
+[dependencies]
+aureole = "0.0.1-beta.3"
+aureole-webview = "0.0.1-beta.3"
+```
 
 ## 文档
 
@@ -67,7 +79,7 @@ fn main() {
 装上打包工具，就能把应用打包成 macOS 的 .app 和 .dmg、Windows 的安装程序、Linux 的 .deb 和 AppImage，设置写在应用的 `Cargo.toml` 里，见教程的[打包与发布](https://github.com/ruoyu-lab/aureole/blob/master/docs/guide/23-打包与发布.md)。
 
 ```bash
-cargo install aureole-bundle --version 0.0.1-beta.2
+cargo install aureole-bundle --version 0.0.1-beta.3
 cargo bundle --release
 ```
 

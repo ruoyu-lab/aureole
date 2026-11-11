@@ -135,6 +135,11 @@ impl Session {
         self.mode
     }
 
+    /// 安装包（卸载时是卸载程序，没有文件）
+    pub(crate) fn package(&self) -> &'static Package {
+        self.package
+    }
+
     /// 清单：应用名、版本、发布者
     pub fn manifest(&self) -> &'static Manifest {
         self.package.manifest()

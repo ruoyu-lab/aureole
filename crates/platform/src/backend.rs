@@ -94,6 +94,8 @@ pub struct Capabilities {
     pub supports_clipboard_rich_text: bool,
     /// 一次能放几种格式（不能时只放最优先的一种：文件、图片、文字）
     pub supports_clipboard_multiple_formats: bool,
+    /// 剪贴板能放应用自己定的格式（[`crate::ClipboardContent::custom`]）
+    pub supports_clipboard_custom: bool,
     /// 有系统的文件对话框
     pub supports_file_dialog: bool,
     /// 此刻能发系统通知（macOS 要打包成 .app，Windows 要有应用标识）
@@ -124,6 +126,8 @@ pub struct Capabilities {
     pub supports_snap_layouts: bool,
     /// 窗口背后能透出系统的材质（`WindowMaterial`）；没有时照常画不透明的背景
     pub supports_window_backdrop: bool,
+    /// 能打印：系统的打印对话框，把画好的页交给打印机（[`DialogService::print_dialog`]）
+    pub supports_print: bool,
 }
 
 impl Capabilities {
@@ -137,6 +141,7 @@ impl Capabilities {
         supports_clipboard_files: false,
         supports_clipboard_rich_text: false,
         supports_clipboard_multiple_formats: false,
+        supports_clipboard_custom: false,
         supports_file_dialog: false,
         supports_notification: false,
         supports_notification_actions: false,
@@ -152,6 +157,7 @@ impl Capabilities {
         supports_title_bar_controls: false,
         supports_snap_layouts: false,
         supports_window_backdrop: false,
+        supports_print: false,
     };
 }
 
@@ -197,12 +203,35 @@ pub struct Conventions {
     pub line_edge: LineEdgeKeys,
     /// 重做
     pub redo: RedoKeys,
-    /// 滚轮按行报告时一行滚多远（逻辑像素）。macOS 的滚轮事件自带加速，一行短一些；其他平台一格一行，按三行文字算
+    /// 一"行"滚多远（逻辑像素）：方向键滚一下、翻页留下的重叠。macOS 的滚轮事件自带加速，一行短一些；其他平台一格一行，按三行文字算
     pub wheel_line_height: f32,
+    /// 滚轮滚一格滚多远（逻辑像素），竖着、横着：Windows 按系统设置的"一次滚动的行数""一次滚动的字符数"
+    /// （一行是 `wheel_line_height` 的三分之一），其他平台等于 `wheel_line_height`
+    pub wheel_notch: [f32; 2],
+    /// 滚轮一格滚一屏（Windows 的"一次滚动一个屏幕"）
+    pub wheel_scrolls_pages: bool,
+    /// 滚轮报来的不足一格的行数是精确的位移（Windows、Linux 的触控板），直接跟着走
+    pub fractional_wheel_is_precise: bool,
+    /// 按住 Shift 转滚轮是横着滚（Windows、Linux；macOS 的系统自己换好了）
+    pub shift_wheel_scrolls_horizontally: bool,
+    /// 按住 Control 转滚轮是缩放（Windows：触控板的双指捏合也这样报）
+    pub control_wheel_zooms: bool,
     /// 按住 Control 点左键算右键点击（macOS）
     pub treats_control_click_as_secondary: bool,
     /// 手指按住不动多久算长按
     pub long_press_duration: Duration,
+    /// 两次按下最多隔多久算双击（Windows 按系统设置）
+    pub double_click_interval: Duration,
+    /// 两次按下最远隔多远算双击（逻辑像素）：Windows 是系统双击范围（矩形）的外接圆的半径
+    pub double_click_distance: f32,
+    /// 按下后移动多远算拖动（逻辑像素，Windows 按系统设置）
+    pub drag_threshold: f32,
+    /// 按词往后走到下一个词的开头，跳过词后面的空白（Windows）；否则到词尾
+    pub word_forward_skips_spaces: bool,
+    /// Shift+Insert 粘贴、Ctrl+Insert 复制、Shift+Delete 剪切（Windows、Linux）
+    pub accepts_insert_for_clipboard: bool,
+    /// 输入法要避开的区域左右多留一点（macOS、Linux 的输入法当成要避开的范围；Windows 把左上角当成候选框的位置，不留）
+    pub pads_ime_area: bool,
 }
 
 impl Conventions {
@@ -213,19 +242,42 @@ impl Conventions {
         line_edge: LineEdgeKeys::PrimaryArrows,
         redo: RedoKeys::ShiftZ,
         wheel_line_height: 40.0,
+        wheel_notch: [40.0, 40.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: false,
+        shift_wheel_scrolls_horizontally: false,
+        control_wheel_zooms: false,
         treats_control_click_as_secondary: true,
         long_press_duration: Duration::from_millis(500),
+        double_click_interval: Duration::from_millis(400),
+        double_click_distance: 4.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: false,
+        accepts_insert_for_clipboard: false,
+        pads_ime_area: true,
     };
 
-    /// Windows 的惯例
+    /// Windows 的惯例：系统的默认设置。本机后端按此刻的系统设置换掉滚轮、双击、拖动的那几项
     pub const WINDOWS: Self = Self {
         primary_modifier: ModifierKey::Control,
         word_modifier: ModifierKey::Control,
         line_edge: LineEdgeKeys::HomeEnd,
         redo: RedoKeys::YOrShiftZ,
         wheel_line_height: 100.0,
+        wheel_notch: [100.0, 100.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: true,
+        shift_wheel_scrolls_horizontally: true,
+        control_wheel_zooms: true,
         treats_control_click_as_secondary: false,
         long_press_duration: Duration::from_millis(800),
+        double_click_interval: Duration::from_millis(500),
+        // 默认的双击范围是 4 × 4 的矩形：外接圆的半径是 2√2
+        double_click_distance: std::f32::consts::SQRT_2 * 2.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: true,
+        accepts_insert_for_clipboard: true,
+        pads_ime_area: false,
     };
 
     /// Linux 桌面的惯例
@@ -235,8 +287,19 @@ impl Conventions {
         line_edge: LineEdgeKeys::HomeEnd,
         redo: RedoKeys::ShiftZ,
         wheel_line_height: 100.0,
+        wheel_notch: [100.0, 100.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: true,
+        shift_wheel_scrolls_horizontally: true,
+        control_wheel_zooms: false,
         treats_control_click_as_secondary: false,
         long_press_duration: Duration::from_millis(500),
+        double_click_interval: Duration::from_millis(400),
+        double_click_distance: 4.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: false,
+        accepts_insert_for_clipboard: true,
+        pads_ime_area: true,
     };
 
     /// 编译目标的系统的惯例（其他系统按 Linux 的）
@@ -297,10 +360,20 @@ pub trait PlatformBackend: Send + Sync + 'static {
 
 }
 
+/// 窗口内容区的大小（物理像素）马上要变了：按它出一帧、呈现，返回之后系统才真的改（见 [`WindowService::watch_live_resize`]）
+pub type OnLiveResize = Box<dyn Fn([u32; 2])>;
+
 /// 窗口相关的服务。都只在主线程上有效
 pub trait WindowService: Send + Sync {
     /// 窗口所在显示器的颜色能力；不知道时是 `None`（调用方按普通显示器处理）
     fn display_color(&self, window: &dyn HasWindowHandle) -> Option<DisplayColor>;
+
+    /// 窗口所在的显示器接在哪块 GPU 上（Windows：双显卡的台式机上显示器常接在独立显卡上）。渲染先用这块，
+    /// 画好的画面不用跨显卡拷过去。不知道、只有一块 GPU 的平台是 `None`
+    fn display_adapter(&self, window: &dyn HasWindowHandle) -> Option<crate::DisplayAdapter> {
+        let _ = window;
+        None
+    }
 
     /// 指针此刻在窗口内容区里的位置（逻辑像素，左上角为原点，可能在窗口外）。拖文件时窗口收不到指针移动事件，用它
     fn pointer_position(&self, window: &dyn HasWindowHandle) -> Option<[f32; 2]>;
@@ -317,12 +390,13 @@ pub trait WindowService: Send + Sync {
     /// 先按滚轮事件自己带的位置补发一个指针移动，这个位置可能是旧的，运行时要靠它认出来
     fn handling_wheel_event(&self) -> bool;
 
-    /// 开始把文件或文字拖到应用外面，`at` 是起点（窗口里的逻辑像素）。开始了返回 `Ok`，结束时调用 `on_end`（是否放下了）
+    /// 开始把内容拖到应用外面，`at` 是起点（窗口里的逻辑像素）。内容和剪贴板的一样（文件、文字、带格式的文字、图片、
+    /// 应用自己定的格式），接收的程序挑自己认的；可以是空的，这时只有这个进程自己的窗口认得
+    /// （[`crate::external_drag::ExternalDataKinds::own`]）。开始了返回 `Ok`，结束时调用 `on_end`（是否放下了）
     fn begin_drag_out(
         &self,
         window: &dyn HasWindowHandle,
-        files: &[PathBuf],
-        text: Option<&str>,
+        content: &crate::ClipboardContent,
         at: [f32; 2],
         on_end: Box<dyn FnOnce(bool)>,
     ) -> Result<(), PlatformError>;
@@ -356,6 +430,14 @@ pub trait WindowService: Send + Sync {
 
     /// 系统的安全输入此刻开着（本进程或别的进程打开的都算；不支持的平台是 `false`）
     fn is_secure_input_enabled(&self) -> bool {
+        false
+    }
+
+    /// 让窗口的输入法放弃正在组的字（没确定的字丢掉，候选框收起）。界面放弃了组字（点了别处、换了焦点）时在关、开输入法之前调用：
+    /// Windows 上关、开输入法只是把输入法的上下文摘下、挂回，组到一半的字还留在里面（下一个键接着组，或者被当成确定的字送回来），
+    /// 要通知输入法取消（`ImmNotifyIME` 的 `CPS_CANCEL`）。返回通知了没有；别的平台关、开输入法就够了，什么都不做，返回 `false`
+    fn cancel_ime_composition(&self, window: &dyn HasWindowHandle) -> bool {
+        let _ = window;
         false
     }
 
@@ -395,6 +477,14 @@ pub trait WindowService: Send + Sync {
         let _ = (window, area);
     }
 
+    /// 隐藏了标题栏的窗口在内容区外面还有多宽的系统边框（物理像素，左右两条加起来、下边一条）：
+    /// Windows 上留着系统的边框好在窗口外面拖着改大小，窗口库却按"无边框的窗口内容区就是整个窗口"换算要的大小，
+    /// 要内容区是某个大小时把它加上再要。没有这回事（别的平台、没隐藏标题栏、最大化、全屏）时是 `None`
+    fn hidden_title_bar_frame(&self, window: &dyn HasWindowHandle) -> Option<[u32; 2]> {
+        let _ = window;
+        None
+    }
+
     /// 系统设置里双击标题栏该做什么
     fn title_bar_action(&self) -> TitleBarAction {
         TitleBarAction::Zoom
@@ -405,6 +495,33 @@ pub trait WindowService: Send + Sync {
     /// 这期间一帧也出不了。所以投递到主线程的运行循环，下一次转起来时执行。别的平台没有这回事，直接执行
     fn run_outside_event_callback(&self, f: Box<dyn FnOnce()>) {
         f();
+    }
+
+    /// 窗口的大小真正变之前回调 `on_resize`（主线程，在系统改大小的那次调用里面）：调用方按新大小出一帧、呈现，
+    /// 返回之后系统才把新的窗口大小交给合成器，画面和窗口大小同时变（Windows：在 `WM_NCCALCSIZE` 里）。
+    /// 回调里引起的改大小不再回调。没有这条路的平台返回"不支持"，调用方照旧在大小变了以后出帧
+    fn watch_live_resize(&self, window: &dyn HasWindowHandle, on_resize: OnLiveResize) -> Result<(), PlatformError> {
+        let _ = (window, on_resize);
+        Err(PlatformError::Unsupported("这个平台改窗口大小时没有先出帧的机会".into()))
+    }
+
+    /// 窗口自己的位图（Windows：画面放在系统合成的对象上时垫在下面，改大小时没赶上的地方露出来）用这个颜色填（8 位 sRGB），
+    /// `None` 不填。要在 [`Self::watch_live_resize`] 之后调用；没有这回事的平台什么都不做
+    fn set_window_background(&self, window: &dyn HasWindowHandle, color: Option<[u8; 3]>) {
+        let _ = (window, color);
+    }
+
+    /// 主线程此刻在系统自己的模态循环里（Windows：拖动窗口、改窗口大小，菜单打开着）。这期间窗口库照常交出窗口事件和
+    /// 投递的事件，但不报告"这一轮处理完了"，也不按截止时间醒来：运行时要在收到的事件里自己推进一轮，
+    /// 截止时间交给 [`Self::wake_in_modal_loop`]。别的平台没有这回事，是 `false`
+    fn in_modal_loop(&self) -> bool {
+        false
+    }
+
+    /// 过 `after` 用 `waker` 叫醒事件循环一次，系统的模态循环里也算数（之前定的作废）；`None` 只取消。
+    /// 窗口库自己按截止时间醒来、没有模态循环的平台什么都不做
+    fn wake_in_modal_loop(&self, after: Option<Duration>, waker: &std::task::Waker) {
+        let _ = (after, waker);
     }
 
     /// 窗口的外框（标题栏、边框、窗口材质的底色）用深色还是浅色，跟着应用的外观。`backdrop` 是窗口此刻的材质。
@@ -488,6 +605,13 @@ pub trait ClipboardService: Send + Sync {
     /// 剪贴板里的文件
     fn read_files(&self) -> Result<Vec<PathBuf>, PlatformError>;
 
+    /// 剪贴板里应用自己定的格式 `format` 的字节（见 [`crate::ClipboardContent::custom`]），原样交回；没有这种格式时是 `Ok(None)`。
+    /// 默认不支持（[`Capabilities::supports_clipboard_custom`]）
+    fn read_custom(&self, format: &str) -> Result<Option<Vec<u8>>, PlatformError> {
+        let _ = format;
+        Err(PlatformError::Unsupported("这个平台的剪贴板放不了应用自己定的格式".into()))
+    }
+
     /// 换掉剪贴板的内容，一次放几种格式；什么都没有时是清空。
     /// 一次只能放一种的平台（[`Capabilities::supports_clipboard_multiple_formats`]）放最优先的一种：文件、图片、文字
     fn write(&self, content: &ClipboardContent) -> Result<(), PlatformError>;
@@ -504,6 +628,23 @@ pub trait DialogService: Send + Sync {
 
     /// 模态的出错提示框，用户关掉后返回（只在主线程；没有提示框的平台什么都不做）
     fn alert(&self, title: &str, message: &str);
+
+    /// 弹出系统的打印对话框（选打印机、纸张、份数），用户关掉后调用 `done`：选好是 `Ok(Some(..))`，取消是 `Ok(None)`。
+    /// 选好以后不管印不印都要交一次 [`Self::print`]（不印时交空的页），对话框给的打印机才释放。
+    /// macOS 上只能在主线程打开，有 `parent` 时是它的表单，在主线程完成；Windows 要有 `parent`，在对话框自己的线程里完成。
+    /// 默认不支持（[`Capabilities::supports_print`]）
+    fn print_dialog(&self, parent: Option<&dyn HasWindowHandle>, done: crate::PrintDialogDone) {
+        let _ = parent;
+        done(Err(PlatformError::Unsupported("这个平台还不能打印".into())));
+    }
+
+    /// 把画好的每一页交给对话框选好的打印机：每页铺满能印到的范围（[`crate::PrintSetup::printable`]，按它的比例画），
+    /// `title` 是打印队列里的名字。交给系统的打印队列以后调用 `done`（用户在系统接着弹的界面里取消了是 `Ok(false)`）：
+    /// macOS 上显示进度、印完才返回，在主线程完成；Windows 在自己的线程里印、完成。没有页时只释放打印机
+    fn print(&self, setup: crate::PrintSetup, title: &str, pages: Vec<crate::RgbaImage>, done: crate::PrintDone) {
+        let _ = (setup, title, pages);
+        done(Err(PlatformError::Unsupported("这个平台还不能打印".into())));
+    }
 }
 
 /// 外壳的服务：用默认应用打开、在文件管理器里显示

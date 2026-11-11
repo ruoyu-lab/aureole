@@ -1,7 +1,9 @@
 //! GPU 适配器和设备：按偏好和退路选适配器，按适配器的能力要设备，设备丢失后重新创建一次。
 //!
-//! 选适配器的先后（[`try_order`]）：主要后端（Metal、DX12、Vulkan）上偏好的那种显卡（省电：集成；高性能：独立）→
-//! 另一种 → 主要后端上的软件适配器（WARP、lavapipe）→ 次要后端（GL）上的，同样先硬件再软件（llvmpipe）。
+//! 选适配器的先后（[`try_order`]）：主要后端（Metal、DX12、Vulkan）上偏好的那种显卡（省电：驱动窗口所在显示器的那块，
+//! 不知道时集成；高性能：独立）→ 另一种 → 主要后端上的软件适配器（WARP、lavapipe）→ 次要后端（GL）上的，同样先硬件再软件（llvmpipe）。
+//! 同一块显卡上平台原生的后端在前：Windows 上 DX12 先于 Vulkan（交换链走 DXGI 的翻转模型，改窗口大小只调整缓冲，
+//! 能放到系统合成的对象上；Vulkan 每次改大小要重建交换链）。
 //! 一个适配器打不开（能力不够、要设备失败）就试下一个。枚举出来的都不行时，
 //! 再让 wgpu 按窗口的表面直接找一次（先找硬件，再 `force_fallback_adapter` 找软件）。都失败时返回 [`GpuError`]。
 //!
@@ -29,6 +31,7 @@ pub struct Gpu {
     /// 设备丢失后用来重新创建
     instance: wgpu::Instance,
     preference: GpuPreference,
+    display: Option<DisplayGpu>,
     /// 进程里第几个设备（重新创建时认出是哪一个丢了）
     id: u64,
     /// 0：最初的设备；1：丢失后重新创建的
@@ -49,6 +52,17 @@ pub enum GpuPreference {
     /// 只用软件渲染的适配器（Windows 的 WARP、Linux 的 llvmpipe / lavapipe）：排查驱动问题、
     /// 在没有 GPU 的机器上测试。macOS 没有软件适配器，这时 [`Gpu::request`] 返回 [`GpuError::NoAdapter`]
     Software,
+}
+
+/// 驱动窗口所在显示器的那块 GPU：PCI 的厂商号、设备号，和 `wgpu::AdapterInfo` 的 `vendor`、`device` 对得上。
+/// 省电偏好下先用它（[`Gpu::request_for_display`]）：显示器接在独立显卡上时（Windows 的台式机常这样），用集成显卡画
+/// 并不省电（独立显卡照样醒着在合成、在输出），每帧还要把画面跨显卡拷过去，改窗口大小时尤其跟不上
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayGpu {
+    /// PCI 厂商号
+    pub vendor: u32,
+    /// PCI 设备号
+    pub device: u32,
 }
 
 impl GpuPreference {
@@ -180,9 +194,36 @@ pub fn instance() -> wgpu::Instance {
     wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
 }
 
-/// 同 [`instance`]，带上窗口系统的连接（事件循环的显示句柄）：Linux 上 GL 后端（EGL）在 Wayland 上要它才能在窗口上画
+/// 同 [`instance`]，带上窗口系统的连接（事件循环的显示句柄）：Linux 上 GL 后端（EGL）在 Wayland 上要它才能在窗口上画。
+///
+/// Windows 上：
+/// - 没设 `WGPU_BACKEND` 时只开 DX12（有自己的软件渲染 WARP 兜底）：加载 Vulkan、GL 的驱动和枚举它们的适配器要一两百毫秒，
+///   启动时白白等着。DX12 一个能用的适配器都没有时，调用方用 [`instance_with_all_backends`] 再来一次；
+/// - 调试构建也不默认打开图形接口的校验层：装了"图形工具"的机器上 D3D12 的调试层会跟着打开，每次提交、
+///   改交换链大小都慢很多，用框架写的应用 `cargo run` 起来就卡。要校验时设环境变量 `WGPU_VALIDATION=1`
 pub fn instance_with_display(display: impl wgpu::rwh::HasDisplayHandle + fmt::Debug + Send + Sync + 'static) -> wgpu::Instance {
-    wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display)))
+    window_instance(display, true)
+}
+
+/// 同 [`instance_with_display`]，开全部的后端：Windows 上只开 DX12 的实例找不到能用的适配器时的退路
+pub fn instance_with_all_backends(display: impl wgpu::rwh::HasDisplayHandle + fmt::Debug + Send + Sync + 'static) -> wgpu::Instance {
+    window_instance(display, false)
+}
+
+/// [`instance_with_display`] 只开了平台原生的后端（Windows 上没设 `WGPU_BACKEND` 时）：找不到能用的适配器时要换全部的后端再来
+pub fn only_native_backend() -> bool {
+    cfg!(target_os = "windows") && std::env::var_os("WGPU_BACKEND").is_none()
+}
+
+fn window_instance(display: impl wgpu::rwh::HasDisplayHandle + fmt::Debug + Send + Sync + 'static, native_only: bool) -> wgpu::Instance {
+    let mut descriptor = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display));
+    if cfg!(target_os = "windows") {
+        descriptor.flags = wgpu::InstanceFlags::empty().with_env();
+        if native_only && only_native_backend() {
+            descriptor.backends = wgpu::Backends::DX12;
+        }
+    }
+    wgpu::Instance::new(descriptor)
 }
 
 /// 支持就开启的可选功能：时间戳查询测 GPU 耗时（软件适配器、部分驱动没有，没有就不测）；
@@ -190,6 +231,11 @@ pub fn instance_with_display(display: impl wgpu::rwh::HasDisplayHandle + fmt::De
 const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::PIPELINE_CACHE);
 
 impl Gpu {
+    /// 进程里第几个设备：设备丢失、重新创建以后是新的编号。建在设备上的资源（外部纹理）用它认是不是这个设备的
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// 按 `AUREOLE_GPU`（没设时省电）选适配器；找不到能用的 GPU 时 panic。测试、工具里用，应用里用 [`Gpu::request`]
     pub fn new(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Self {
         // 有意 panic：这是给测试、示例、工具的便捷入口，找不到 GPU 时它们本来也做不下去。应用走 `request` 拿到错误
@@ -198,13 +244,24 @@ impl Gpu {
 
     /// 按偏好和退路选适配器、要设备（见模块说明）。`surface` 是要画上去的窗口表面，离屏时为 `None`
     pub fn request(instance: &wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, preference: GpuPreference) -> Result<Self, GpuError> {
-        Self::open(instance, surface, preference, 0)
+        Self::request_for_display(instance, surface, preference, None)
+    }
+
+    /// 同 [`Gpu::request`]，知道窗口所在的显示器由哪块 GPU 驱动（`display`）：省电偏好下先用它
+    pub fn request_for_display(
+        instance: &wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+        preference: GpuPreference,
+        display: Option<DisplayGpu>,
+    ) -> Result<Self, GpuError> {
+        Self::open(instance, surface, preference, display, 0)
     }
 
     fn open(
         instance: &wgpu::Instance,
         surface: Option<&wgpu::Surface<'_>>,
         preference: GpuPreference,
+        display: Option<DisplayGpu>,
         generation: u32,
     ) -> Result<Self, GpuError> {
         let start = Instant::now();
@@ -213,7 +270,7 @@ impl Gpu {
             .filter(|adapter| surface.is_none_or(|surface| adapter.is_surface_supported(surface)))
             .collect();
         tracing::debug!(target: STARTUP_LOG, "枚举 GPU 适配器（{} 个能用）：{:.1} ms", adapters.len(), start.elapsed().as_secs_f64() * 1000.0);
-        let candidates: Vec<Candidate> = adapters.iter().map(|a| Candidate::of(&a.get_info())).collect();
+        let candidates: Vec<Candidate> = adapters.iter().map(|a| Candidate::of(&a.get_info(), display)).collect();
         let (chosen, failed) = choose(&candidates, preference, |i| open_device(&adapters[i]));
         let mut tried: Vec<(GpuInfo, String)> =
             failed.into_iter().map(|(i, reason)| (GpuInfo::of(&adapters[i].get_info()), reason)).collect();
@@ -276,7 +333,10 @@ impl Gpu {
             *active = Some(info.clone());
         }
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Ok(Self { adapter, device, queue, info, lost, errors, instance: instance.clone(), preference, id, generation, disk })
+        // 枚举时每个适配器都建了一份设备（DX12）、一份实例（Vulkan）：没用上的放掉要几百毫秒（这台机器上 8 个适配器约 450 毫秒），
+        // 不放在启动的路上，交给后台线程
+        release_in_background(adapters);
+        Ok(Self { adapter, device, queue, info, lost, errors, instance: instance.clone(), preference, display, id, generation, disk })
     }
 
     /// 设备丢失了（驱动重置、显卡被拔掉、休眠唤醒后驱动出错……）：之后在它上面的操作都没有效果
@@ -304,7 +364,7 @@ impl Gpu {
             return result.clone();
         }
         tracing::info!("GPU：重新创建设备");
-        let result = Self::open(&self.instance, surface, self.preference, self.generation + 1).map(Arc::new);
+        let result = Self::open(&self.instance, surface, self.preference, self.display, self.generation + 1).map(Arc::new);
         *slot = Some((self.id, result.clone()));
         result
     }
@@ -321,6 +381,18 @@ impl Drop for Gpu {
         if let Some(disk) = &self.disk {
             disk.save();
         }
+    }
+}
+
+/// 在后台线程上放掉用不上的适配器；开不了线程时就地放
+fn release_in_background(adapters: Vec<wgpu::Adapter>) {
+    let mut adapters = Some(adapters);
+    let spawned = std::thread::Builder::new().name("释放适配器".into()).spawn({
+        let adapters = adapters.take();
+        move || drop(adapters)
+    });
+    if spawned.is_err() {
+        drop(adapters);
     }
 }
 
@@ -375,7 +447,9 @@ fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)
             label: Some("device"),
             required_features: features,
             required_limits: limits.clone(),
-            memory_hints: wgpu::MemoryHints::Performance,
+            // 界面的每笔分配都很小：Performance 下 Vulkan、DX12 的分配器一开始就向驱动要 128MB、64MB 起的块，
+            // 一个小窗口也占两三百 MB（核显上算进进程的内存）
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         };
         match pollster::block_on(adapter.request_device(&descriptor)) {
@@ -426,22 +500,28 @@ pub(crate) fn unmet_requirements(limits: &wgpu::Limits, flags: wgpu::DownlevelFl
     (!unmet.is_empty()).then(|| format!("能力不够：{}", unmet.join("、")))
 }
 
-/// 排先后时只看适配器的后端和种类
+/// 排先后时看适配器的后端、种类，是不是平台原生的后端，驱动不驱动窗口所在的显示器
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Candidate {
     pub backend: wgpu::Backend,
     pub kind: GpuKind,
+    /// 这个平台原生的图形接口（Windows 上 Vulkan 不是，DX12 是；别的平台都算是）
+    pub native: bool,
+    /// 驱动窗口所在的显示器；不知道是哪块时是 `None`
+    pub on_display: Option<bool>,
 }
 
 impl Candidate {
-    fn of(info: &wgpu::AdapterInfo) -> Self {
-        Self { backend: info.backend, kind: info.device_type.into() }
+    fn of(info: &wgpu::AdapterInfo, display: Option<DisplayGpu>) -> Self {
+        let native = !(cfg!(target_os = "windows") && info.backend == wgpu::Backend::Vulkan);
+        let on_display = display.map(|d| d.vendor == info.vendor && d.device == info.device);
+        Self { backend: info.backend, kind: info.device_type.into(), native, on_display }
     }
 }
 
 /// 试适配器的先后（`candidates` 的下标）。不考虑的（不是真正的图形后端；只要软件渲染时的硬件适配器）不在里面
 pub(crate) fn try_order(candidates: &[Candidate], preference: GpuPreference) -> Vec<usize> {
-    let mut order: Vec<(usize, (u8, u8, u8))> =
+    let mut order: Vec<(usize, RankKey)> =
         candidates.iter().enumerate().filter_map(|(i, c)| rank(*c, preference).map(|key| (i, key))).collect();
     order.sort_by_key(|&(i, key)| (key, i));
     order.into_iter().map(|(i, _)| i).collect()
@@ -466,8 +546,11 @@ pub(crate) fn choose<D>(
     (None, failed)
 }
 
-/// 排序键：(次要后端, 软件, 种类)，越小越先
-fn rank(candidate: Candidate, preference: GpuPreference) -> Option<(u8, u8, u8)> {
+/// 排序键：(次要后端, 软件, 省电时不驱动窗口所在的显示器, 种类, 不是原生后端)，越小越先
+type RankKey = (u8, u8, u8, u8, u8);
+
+/// 一个候选的 [`RankKey`]；不考虑的是 `None`
+fn rank(candidate: Candidate, preference: GpuPreference) -> Option<RankKey> {
     let secondary = match candidate.backend {
         wgpu::Backend::Metal | wgpu::Backend::Dx12 | wgpu::Backend::Vulkan => false,
         wgpu::Backend::Gl => true,
@@ -484,5 +567,6 @@ fn rank(candidate: Candidate, preference: GpuPreference) -> Option<(u8, u8, u8)>
         (GpuKind::Virtual, _) => 3,
         (GpuKind::Software, _) => 4,
     };
-    Some((u8::from(secondary), u8::from(software), kind))
+    let off_display = preference == GpuPreference::LowPower && candidate.on_display == Some(false);
+    Some((u8::from(secondary), u8::from(software), u8::from(off_display), kind, u8::from(!candidate.native)))
 }

@@ -59,8 +59,11 @@ impl SystemBackend for PlatformSystem {
     }
 
     fn file_dialog(&self, request: FileDialogRequest, done: FileDialogDone) {
-        // 在窗口里调用时是这个窗口的表单
-        let parent = crate::window::current_window().and_then(crate::window::native);
+        // 父窗口：发起的窗口（macOS 上对话框是它的表单）。Windows、Linux 上从菜单栏、托盘、定时器里打开时没有发起的窗口，
+        // 用最近有焦点的（再不行最早打开的）：Windows 上没有父窗口的对话框出现在屏幕左上角，窗口也不等它关掉
+        let parent = crate::window::current_window()
+            .or_else(|| if cfg!(target_os = "macos") { None } else { crate::window::front_window() })
+            .and_then(crate::window::native);
         backend().dialog().file_dialog(dialog_options(request), parent.as_deref().map(|w| w as &dyn HasWindowHandle), done);
     }
 
@@ -139,8 +142,19 @@ fn conventions(platform: &platform::Conventions) -> Conventions {
         uses_arrows_for_line_edges: platform.line_edge == LineEdgeKeys::PrimaryArrows,
         accepts_y_for_redo: platform.redo == RedoKeys::YOrShiftZ,
         wheel_line_height: platform.wheel_line_height,
+        wheel_notch: platform.wheel_notch,
+        wheel_scrolls_pages: platform.wheel_scrolls_pages,
+        fractional_wheel_is_precise: platform.fractional_wheel_is_precise,
+        shift_wheel_scrolls_horizontally: platform.shift_wheel_scrolls_horizontally,
+        control_wheel_zooms: platform.control_wheel_zooms,
         treats_control_click_as_secondary: platform.treats_control_click_as_secondary,
         long_press_duration: platform.long_press_duration,
+        double_click_interval: platform.double_click_interval,
+        double_click_distance: platform.double_click_distance,
+        drag_threshold: platform.drag_threshold,
+        word_forward_skips_spaces: platform.word_forward_skips_spaces,
+        accepts_insert_for_clipboard: platform.accepts_insert_for_clipboard,
+        pads_ime_area: platform.pads_ime_area,
     }
 }
 
@@ -212,6 +226,19 @@ pub fn appearance() -> Appearance {
 pub fn is_motion_reduced() -> bool {
     install();
     aureole_core::is_motion_reduced()
+}
+
+/// 系统开着低电量模式（macOS：系统设置 → 电池；Windows：节电模式；Linux 总是 `false`）。每次调用问一次系统，不是响应式的。
+/// macOS 上开着时系统只把窗口画面显示到每秒 60 帧，框架的帧时钟跟着降到 60，不白画另一半；
+/// 应用可以照着少做些动画、少轮询。环境变量 `AUREOLE_LOW_POWER=1`（或 `0`）当作开着（关着），排查、测试用
+pub fn is_low_power_mode() -> bool {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| match std::env::var("AUREOLE_LOW_POWER").as_deref() {
+        Ok("1") => Some(true),
+        Ok("0") => Some(false),
+        _ => None,
+    });
+    forced.unwrap_or_else(|| backend().environment().is_low_power_mode())
 }
 
 /// 系统的强调色（macOS：系统设置 → 外观；Windows：个性化 → 颜色；Linux：门户的 `accent-color`，GNOME 47+、KDE），

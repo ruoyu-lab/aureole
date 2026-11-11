@@ -20,8 +20,10 @@ use crate::overlay::OverlaySpec;
 use crate::geometry::Rect;
 use crate::layout::Direction;
 
-/// 按下后移动超过这么远才算拖动，逻辑像素
-pub(super) const DRAG_THRESHOLD: f32 = 4.0;
+/// 按下后移动超过这么远才算拖动，逻辑像素：平台惯例里的（[`crate::Conventions::drag_threshold`]，Windows 跟着系统设置）
+pub(super) fn drag_threshold() -> f32 {
+    crate::system::conventions().drag_threshold
+}
 /// 拖动速度按最近这么久的移动估计，秒
 pub(super) const VELOCITY_WINDOW: f64 = 0.1;
 
@@ -605,6 +607,7 @@ pub(super) fn attach(tree: &TreeRef, id: NodeId, interaction: Interaction) -> Ve
         states: _,
         memo: _,
         field_handle,
+        element_handle,
     } = interaction;
     if let Some(drag_drop) = drag_drop {
         tree.borrow_mut().with_input(id, |i| i.drag_drop = Some(Rc::new(*drag_drop)));
@@ -614,6 +617,9 @@ pub(super) fn attach(tree: &TreeRef, id: NodeId, interaction: Interaction) -> Ve
     }
     if let Some(handle) = focus_handle {
         bind_focus_handle(tree, id, handle);
+    }
+    if let Some(handle) = element_handle {
+        bind_element_handle(tree, id, handle);
     }
     for signal in measure {
         tree.borrow_mut().measures.add(id, signal);
@@ -652,6 +658,21 @@ fn bind_focus_handle(tree: &TreeRef, id: NodeId, handle: FocusHandle) {
         }
     });
     tree_ref.borrow_mut().router.add_handle(handle, id);
+}
+
+/// 元素的句柄：新的请求记进树，下一帧定位之后滚进视口（要用这一帧的布局）
+fn bind_element_handle(tree: &TreeRef, id: NodeId, handle: crate::scroll::ElementHandle) {
+    let tree: Weak<_> = Rc::downgrade(tree);
+    Effect::new(move || {
+        let request = handle.request.get();
+        if request.serial <= handle.handled.get_untracked() {
+            return;
+        }
+        handle.handled.set(request.serial);
+        if let Some(tree) = tree.upgrade() {
+            tree.borrow_mut().request_reveal(id, request.animated);
+        }
+    });
 }
 
 // ---- 指针 ----

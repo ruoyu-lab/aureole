@@ -15,7 +15,7 @@
 //!      写回后再排，最多 [`EXTRA_LAYOUTS`] 遍；然后布局位置的过渡、无障碍、滚动范围（[`Tree::lay_out`]）
 //!    - 布局之后：插入点滚进视口、共享元素决定显示谁（[`Tree::after_layout`]）
 //!    - 定位：布局了就把绝对位置、内容区、到屏幕的变换写到全部节点上；没布局时只重算静态地改了变换的子树
-//!      （[`Tree::place`]，见 `tree/place.rs`）
+//!      （[`Tree::place`]，见 `tree/place.rs`）；然后元素的句柄要求的滚进视口（[`Tree::run_reveals`]，要用定位好的位置）
 //!    - 绘制：生成显示列表；有画布等着重画时推迟（[`Tree::paint_phase`]）
 //!    - 绘制之后：动图换帧、拖放的影子落向哪里、浮层跟着锚点（[`Tree::after_paint`]）
 //! 5. **写回**：滚动偏移、浮层的位置、焦点处理器、动图播完、测量结果、时间线、画布写回信号（[`write_back`]）；
@@ -173,6 +173,7 @@ impl Tree {
         self.lay_out(now, &mut stats);
         self.after_layout(now);
         self.place(&stats);
+        self.run_reveals();
         self.paint_phase(&mut stats);
         self.after_paint(now, time, &stats);
         [stats.quads, stats.layers] = [self.paint.list().quads.len(), self.paint.layers().len()];

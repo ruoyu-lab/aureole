@@ -18,6 +18,9 @@ pub(crate) fn window_attributes(attributes: WindowAttributes, title_bar: TitleBa
     #[cfg(target_os = "windows")]
     {
         use winit::platform::windows::WindowAttributesExtWindows;
+        // 无边框：窗口库留着标题栏和边框的样式（贴靠、动画、阴影靠它），按"内容区就是整个窗口"换算大小。内容区由平台层的子类
+        // 自己算（左、右、下留系统的边框，见 `aureole_platform` 的 `title_bar/windows.rs`），换算差的边框也由它补上。
+        // 阴影的选项只在子类挂不上时起作用（窗口库自己的内容区，上边空 1 像素换阴影）
         let attributes = if hidden { attributes.with_decorations(false).with_undecorated_shadow(true) } else { attributes };
         if backdrop.is_opaque() { attributes } else { attributes.with_no_redirection_bitmap(true) }
     }

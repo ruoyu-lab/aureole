@@ -1,9 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# crates/webview 带着 CEF 内核：编译时下载内核、编 C++ 的包装层，是单独的工作区，不跟着框架一起编、一起导出
+exclude = ["crates/webview"]
 
 [workspace.package]
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 edition = "2024"
 rust-version = "1.90"
 license = "Apache-2.0"
@@ -34,20 +36,20 @@ broken_intra_doc_links = "deny"
 
 [workspace.dependencies]
 # 发布到 crates.io 时路径依赖要换成版本号，所以两样都写
-scene = { path = "crates/scene", package = "aureole-scene", version = "0.0.1-beta.2" }
-render = { path = "crates/render", package = "aureole-render", version = "0.0.1-beta.2" }
+scene = { path = "crates/scene", package = "aureole-scene", version = "0.0.1-beta.3" }
+render = { path = "crates/render", package = "aureole-render", version = "0.0.1-beta.3" }
 # 不开默认特性：菜单栏和托盘的库由门面 aureole 的 `menus` 特性决定（测试工具、演示的公共库都不替应用打开）
-platform = { path = "crates/platform", package = "aureole-platform", version = "0.0.1-beta.2", default-features = false }
-animation = { path = "crates/animation", package = "aureole-animation", version = "0.0.1-beta.2" }
-reactive = { path = "crates/reactive", package = "aureole-reactive", version = "0.0.1-beta.2" }
+platform = { path = "crates/platform", package = "aureole-platform", version = "0.0.1-beta.3", default-features = false }
+animation = { path = "crates/animation", package = "aureole-animation", version = "0.0.1-beta.3" }
+reactive = { path = "crates/reactive", package = "aureole-reactive", version = "0.0.1-beta.3" }
 # 核心的包名是 aureole-core，不设短名（短名 core 会遮住 Rust 自带的 core），框架内部写全名 aureole_core。
 # 不开默认特性：分词词典、WOFF2 由门面 aureole 的特性决定（运行时、控件、测试工具都不替应用打开）
-aureole-core = { path = "crates/core", version = "0.0.1-beta.2", default-features = false }
-runtime = { path = "crates/runtime", package = "aureole-runtime", version = "0.0.1-beta.2", default-features = false }
-controls = { path = "crates/controls", package = "aureole-controls", version = "0.0.1-beta.2" }
-testing = { path = "crates/testing", package = "aureole-testing", version = "0.0.1-beta.2" }
-devtools = { path = "crates/devtools", package = "aureole-devtools", version = "0.0.1-beta.2" }
-aureole = { path = "crates/aureole", version = "0.0.1-beta.2" }
+aureole-core = { path = "crates/core", version = "0.0.1-beta.3", default-features = false }
+runtime = { path = "crates/runtime", package = "aureole-runtime", version = "0.0.1-beta.3", default-features = false }
+controls = { path = "crates/controls", package = "aureole-controls", version = "0.0.1-beta.3" }
+testing = { path = "crates/testing", package = "aureole-testing", version = "0.0.1-beta.3" }
+devtools = { path = "crates/devtools", package = "aureole-devtools", version = "0.0.1-beta.3" }
+aureole = { path = "crates/aureole", version = "0.0.1-beta.3" }
 # 演示的公共库（不发布）：演示里统一用短名 support
 wgpu = "30"
 # 着色器解析（render 的测试用）：和 wgpu 用的是同一版

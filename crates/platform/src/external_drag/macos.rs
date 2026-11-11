@@ -5,22 +5,29 @@
 //! 在视图上登记更多类型。有文件的拖放原样转给窗口代理，窗口库照旧发文件的窗口事件；别的内容交给回调。
 //!
 //! 回答（光标）总是交给回调决定：文件的回答也是，窗口代理的返回值只用来转发。
+//!
+//! 这个进程自己拖出去的（[`ExternalDataKinds::own`]）不转给窗口代理：文件也交给回调（和 Windows 一样），
+//! 运行时决定是交给应用自己的窗口之间的拖放，还是发文件的窗口事件。
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::CStr;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, NSObjectProtocol, Sel};
 use objc2::{MainThreadMarker, Message, ffi, msg_send, sel};
-use objc2_app_kit::{NSDragOperation, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF, NSPasteboardTypeURL, NSView};
-use objc2_foundation::{NSArray, NSPoint, ns_string};
+use objc2_app_kit::{
+    NSDragOperation, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeRTF, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSPasteboardTypeURL, NSView,
+};
+use objc2_foundation::{NSArray, NSPoint, NSString, ns_string};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{ExternalDataKinds, ExternalDrag, ExternalDropData, ExternalDropEffect, OnExternalDrag, guarded};
 use crate::PlatformError;
-use crate::clipboard::macos::{has_image, has_type, image_on};
+use crate::clipboard::macos::{files_on, has_image, has_type, image_on};
 
 /// 一个视图的回调和这次拖放的状态
 struct Listener {
@@ -57,22 +64,50 @@ fn position_of(view: &NSView, sender: &AnyObject) -> [f32; 2] {
 /// 剪贴板上有哪几种内容
 fn kinds_on(pasteboard: &NSPasteboard) -> ExternalDataKinds {
     // SAFETY: 类型常量是 AppKit 导出的不可变字符串，链接后一直有效
-    let (file, string, url) = unsafe { (NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL) };
+    let (file, string, url, rtf) = unsafe { (NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSPasteboardTypeRTF) };
+    let custom = super::custom_formats().iter().any(|name| has_type(pasteboard, &NSString::from_str(name)));
+    let own = crate::drag::dragging_out();
     if has_type(pasteboard, file) {
-        return ExternalDataKinds { files: true, ..ExternalDataKinds::default() };
+        return ExternalDataKinds { files: true, custom, own, ..ExternalDataKinds::default() };
     }
-    ExternalDataKinds { text: has_type(pasteboard, string), link: has_type(pasteboard, url), image: has_image(pasteboard), files: false }
+    ExternalDataKinds {
+        text: has_type(pasteboard, string),
+        link: has_type(pasteboard, url),
+        image: has_image(pasteboard),
+        files: false,
+        rich_text: has_type(pasteboard, rtf),
+        custom,
+        own,
+    }
 }
 
-/// 剪贴板上的内容（文件交给窗口库，不在这里）
+/// 有文件的拖放转给窗口代理（窗口库发文件的窗口事件）；自己拖出去的不转（见模块说明）
+fn forwards(kinds: ExternalDataKinds) -> bool {
+    kinds.files && !kinds.own
+}
+
+/// 剪贴板上的内容（文件交给窗口库，不在这里；自己拖出去的除外）
 fn data_on(pasteboard: &NSPasteboard, kinds: ExternalDataKinds) -> ExternalDropData {
     // SAFETY: 类型常量是 AppKit 导出的不可变字符串，链接后一直有效
     let (string, url) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeURL) };
+    // SAFETY: 同上
+    let rtf = unsafe { NSPasteboardTypeRTF };
+    let custom = || {
+        super::custom_formats()
+            .into_iter()
+            .filter_map(|name| {
+                let bytes = pasteboard.dataForType(&NSString::from_str(&name))?.to_vec();
+                Some((name, bytes))
+            })
+            .collect()
+    };
     ExternalDropData {
         text: kinds.text.then(|| pasteboard.stringForType(string)).flatten().map(|text| text.to_string()),
         link: kinds.link.then(|| pasteboard.stringForType(url)).flatten().map(|link| link.to_string()),
         image: kinds.image.then(|| image_on(pasteboard)).flatten(),
-        files: Vec::new(),
+        files: if kinds.own && kinds.files { files_on(pasteboard) } else { Vec::new() },
+        rich_text: kinds.rich_text.then(|| pasteboard.dataForType(rtf)).flatten().map(|data| data.to_vec()),
+        custom: if kinds.custom { custom() } else { Vec::new() },
     }
 }
 
@@ -105,38 +140,40 @@ fn delegate_of(view: &NSView, selector: Sel) -> Option<Retained<AnyObject>> {
 unsafe extern "C-unwind" fn dragging_entered(view: &NSView, _: Sel, sender: &AnyObject) -> NSDragOperation {
     guarded(NSDragOperation::None, || {
         let Some(listener) = listener(view) else { return NSDragOperation::None };
-        let kinds = kinds_on(&pasteboard_of(sender));
+        let pasteboard = pasteboard_of(sender);
+        let kinds = kinds_on(&pasteboard);
         listener.kinds.set(kinds);
-        if kinds.files
+        if forwards(kinds)
             && let Some(delegate) = delegate_of(view, sel!(draggingEntered:))
         {
             // SAFETY: 响应这个选择子（上面查过），窗口库的实现收拖放信息、返回 BOOL
             let _: bool = unsafe { msg_send![&*delegate, draggingEntered: sender] };
         }
-        over(view, &listener, sender)
+        let entered = if kinds.files && kinds.own { files_on(&pasteboard) } else { Vec::new() };
+        over(view, &listener, sender, entered)
     })
 }
 
 unsafe extern "C-unwind" fn dragging_updated(view: &NSView, _: Sel, sender: &AnyObject) -> NSDragOperation {
     guarded(NSDragOperation::None, || {
         let Some(listener) = listener(view) else { return NSDragOperation::None };
-        over(view, &listener, sender)
+        over(view, &listener, sender, Vec::new())
     })
 }
 
-fn over(view: &NSView, listener: &Listener, sender: &AnyObject) -> NSDragOperation {
+fn over(view: &NSView, listener: &Listener, sender: &AnyObject, entered_files: Vec<PathBuf>) -> NSDragOperation {
     let kinds = listener.kinds.get();
     if kinds.is_empty() {
         return NSDragOperation::None;
     }
-    let effect = (listener.on_drag)(ExternalDrag::Over { kinds, position: position_of(view, sender), entered_files: Vec::new() });
+    let effect = (listener.on_drag)(ExternalDrag::Over { kinds, position: position_of(view, sender), entered_files });
     operation(effect, sender)
 }
 
 unsafe extern "C-unwind" fn dragging_exited(view: &NSView, _: Sel, sender: Option<&AnyObject>) {
     guarded((), || {
         let Some(listener) = listener(view) else { return };
-        if listener.kinds.get().files
+        if forwards(listener.kinds.get())
             && let Some(delegate) = delegate_of(view, sel!(draggingExited:))
         {
             // SAFETY: 响应这个选择子（上面查过），窗口库的实现收可以为空的拖放信息
@@ -154,7 +191,7 @@ unsafe extern "C-unwind" fn perform_drag_operation(view: &NSView, _: Sel, sender
     let done = guarded(false, || {
         let Some(listener) = listener(view) else { return false };
         let kinds = listener.kinds.get();
-        if kinds.files {
+        if forwards(kinds) {
             let Some(delegate) = delegate_of(view, sel!(performDragOperation:)) else { return false };
             // SAFETY: 响应这个选择子（上面查过），窗口库的实现收拖放信息、返回 BOOL
             return unsafe { msg_send![&*delegate, performDragOperation: sender] };
@@ -168,7 +205,7 @@ unsafe extern "C-unwind" fn perform_drag_operation(view: &NSView, _: Sel, sender
 
 unsafe extern "C-unwind" fn conclude_drag_operation(view: &NSView, _: Sel, sender: Option<&AnyObject>) {
     guarded((), || {
-        if listener(view).is_some_and(|listener| listener.kinds.get().files)
+        if listener(view).is_some_and(|listener| forwards(listener.kinds.get()))
             && let Some(delegate) = delegate_of(view, sel!(concludeDragOperation:))
         {
             // SAFETY: 响应这个选择子（上面查过），窗口库的实现收可以为空的拖放信息
@@ -229,11 +266,15 @@ fn view_of(window: &dyn HasWindowHandle) -> Option<Retained<NSView>> {
 pub fn listen(window: &dyn HasWindowHandle, on_drag: OnExternalDrag) -> Result<(), PlatformError> {
     let view = view_of(window).ok_or_else(|| PlatformError::System("不在主线程，或者不是这个进程的窗口".into()))?;
     add_methods(view.class())?;
+    // 登记过的自己定的格式也接受（要在打开窗口之前登记），还有自己拖出去的标记（内容是空的时只有它）
+    let custom: Vec<Retained<NSString>> =
+        super::custom_formats().iter().map(String::as_str).chain([crate::drag::OWN_TYPE]).map(NSString::from_str).collect();
     // SAFETY: 类型常量是 AppKit 导出的不可变字符串，链接后一直有效
-    let types = unsafe {
-        NSArray::from_slice(&[NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF, ns_string!("public.jpeg")])
+    let mut types: Vec<&NSString> = unsafe {
+        vec![NSPasteboardTypeFileURL, NSPasteboardTypeString, NSPasteboardTypeURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF, NSPasteboardTypeRTF, ns_string!("public.jpeg")]
     };
-    view.registerForDraggedTypes(&types);
+    types.extend(custom.iter().map(|name| &**name));
+    view.registerForDraggedTypes(&NSArray::from_slice(&types));
     let listener = Rc::new(Listener { on_drag, kinds: Cell::new(ExternalDataKinds::default()) });
     LISTENERS.with(|listeners| listeners.borrow_mut().insert(std::ptr::from_ref(&*view) as usize, listener));
     Ok(())

@@ -91,8 +91,12 @@ pub(crate) struct Headless {
     window_drag_count: Cell<usize>,
     /// 请系统按设置处理双击了几次（[`Harness::title_bar_double_click_count`]）
     title_bar_double_click_count: Cell<usize>,
+    /// 请系统弹出窗口菜单的位置（[`Harness::window_menu_requests`]）
+    window_menu_requests: RefCell<Vec<[f32; 2]>>,
     /// 报告给窗口的最大化按钮的范围（[`Harness::maximize_button_area`]）
     maximize_button_area: Cell<Option<aureole_core::Rect>>,
+    /// 同一个应用的别的窗口占着的地方，窗口坐标（[`Harness::set_app_windows`]）
+    app_windows: RefCell<Vec<aureole_core::Rect>>,
 }
 
 impl Headless {
@@ -155,6 +159,11 @@ impl HostWindow for Headless {
         self.drag_out.replace(Some(request));
     }
 
+    fn app_window_at(&self, point: [f32; 2]) -> bool {
+        self.released();
+        self.app_windows.borrow().iter().any(|area| area.contains(point))
+    }
+
     fn focus_changed(&self, _: bool) {
         self.released();
     }
@@ -167,6 +176,11 @@ impl HostWindow for Headless {
     fn perform_title_bar_double_click(&self) {
         self.released();
         self.title_bar_double_click_count.set(self.title_bar_double_click_count.get() + 1);
+    }
+
+    fn show_window_menu(&self, at: [f32; 2]) {
+        self.released();
+        self.window_menu_requests.borrow_mut().push(at);
     }
 
     fn set_maximize_button_area(&self, area: Option<aureole_core::Rect>) {
@@ -210,7 +224,9 @@ impl Harness {
             ime_reset_count: Cell::new(0),
             window_drag_count: Cell::new(0),
             title_bar_double_click_count: Cell::new(0),
+            window_menu_requests: RefCell::default(),
             maximize_button_area: Cell::new(None),
+            app_windows: RefCell::default(),
         };
         Self {
             host: WindowHost::new(tree, headless),
@@ -338,6 +354,11 @@ impl Harness {
     /// 双击窗口的拖动区域、交给系统按设置缩放或最小化窗口的次数
     pub fn title_bar_double_click_count(&self) -> usize {
         self.host.window().title_bar_double_click_count.get()
+    }
+
+    /// 在窗口的拖动区域上点右键、请系统弹出窗口菜单的位置（窗口坐标），按先后
+    pub fn window_menu_requests(&self) -> Vec<[f32; 2]> {
+        self.host.window().window_menu_requests.borrow().clone()
     }
 
     /// 报告给窗口的最大化按钮的范围（属性 `window_maximize_button`），推进一帧之后更新
@@ -788,8 +809,34 @@ impl Harness {
     /// 取走拖到应用外面的请求（窗口里这时交给系统开始拖），没有时是 `None`。
     /// 之后用 [`Self::finish_drag_out`] 模拟系统的会话结束
     pub fn take_drag_out(&self) -> Option<aureole_core::DragOut> {
-        let request = self.host.window().drag_out.take().or_else(|| self.probe.take_drag_out());
-        request.map(|request| request.out)
+        self.take_drag_out_request().map(|request| request.out)
+    }
+
+    /// 取走整个拖到应用外面的请求：拖出去的内容，和从元素之间的拖放交过去时拖着的数据（[`DragOutRequest::data`]，
+    /// 交给别的测试工具的 [`Self::element_drag_over`] 模拟拖到应用的另一个窗口）
+    pub fn take_drag_out_request(&self) -> Option<DragOutRequest> {
+        self.host.window().drag_out.take().or_else(|| self.probe.take_drag_out())
+    }
+
+    /// 窗口外面这几块（窗口坐标，逻辑像素）是同一个应用的别的窗口：拖着元素出了窗口、指针到了这里时交给系统
+    /// （[`Self::take_drag_out_request`] 取到请求）
+    pub fn set_app_windows(&self, areas: Vec<aureole_core::Rect>) {
+        self.host.window().app_windows.replace(areas);
+    }
+
+    /// 模拟应用的另一个窗口交给系统的元素之间拖放经过这个窗口的 `at`：返回有没有元素接收
+    pub fn element_drag_over(&self, at: [f32; 2], data: &std::rc::Rc<dyn std::any::Any>) -> bool {
+        self.host.tree().element_drag_over(at, data)
+    }
+
+    /// 模拟拖来的元素离开了这个窗口
+    pub fn element_drag_leave(&self) {
+        self.host.tree().element_drag_leave();
+    }
+
+    /// 模拟拖来的元素在 `at` 放下：返回有没有被接住
+    pub fn element_drop(&self, at: [f32; 2], data: &std::rc::Rc<dyn std::any::Any>) -> bool {
+        self.host.tree().element_drop(at, data)
     }
 
     /// 模拟系统的拖动会话结束：`accepted` 是有没有被别的应用接住，交给源元素的 `on_drag_out_end`

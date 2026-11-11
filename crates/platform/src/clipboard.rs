@@ -59,9 +59,17 @@ pub struct ClipboardContent {
     pub image: Option<RgbaImage>,
     /// 文件（绝对路径）
     pub files: Vec<PathBuf>,
+    /// 应用自己定的格式：格式名和原样的字节（见 [`crate::ClipboardService::read_custom`]）。
+    /// macOS 上格式名是剪贴板的类型（用反向域名，比如 `com.example.layers`），Windows 上向系统登记成剪贴板格式
+    pub custom: Vec<(String, Vec<u8>)>,
 }
 
 impl ClipboardContent {
+    /// 什么都没有（放进去就是清空）
+    pub fn is_empty(&self) -> bool {
+        self.formats().is_empty() && self.custom.is_empty()
+    }
+
     /// 这些内容有哪几种格式：文件、图片、带格式的文字、纯文字
     pub fn formats(&self) -> Vec<ClipFormat> {
         let mut formats = Vec::new();

@@ -86,7 +86,7 @@ pub fn acquire(id: &str, wait: bool) -> io::Result<InstanceRole> {
         if let Some(primary) = sys::try_primary(id)? {
             return Ok(InstanceRole::Primary(Primary(PrimaryKind::System(primary))));
         }
-        if !wait && let Some(secondary) = sys::try_connect(id) {
+        if !wait && let Some(secondary) = sys::try_connect(id)? {
             return Ok(InstanceRole::Secondary(Secondary(SecondaryKind::System(secondary))));
         }
         if Instant::now() >= deadline {
@@ -427,8 +427,9 @@ mod unix {
         Ok(Some(Primary { listener, held }))
     }
 
-    pub fn try_connect(id: &str) -> Option<Secondary> {
-        UnixStream::connect(paths(id).0).ok().map(Secondary)
+    /// 连上第一个实例的通道；连不上（还没开始监听、正在退出）时是 `None`，隔一会儿再试
+    pub fn try_connect(id: &str) -> io::Result<Option<Secondary>> {
+        Ok(UnixStream::connect(paths(id).0).ok().map(Secondary))
     }
 
     pub fn listen(primary: Primary, stop: Arc<AtomicBool>, on_message: OnMessage) -> Listening {
@@ -499,20 +500,34 @@ mod unix {
 mod windows {
     use std::fs::{File, OpenOptions};
     use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+    use std::sync::{Arc, OnceLock};
+    use std::time::Duration;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    };
+    use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows_sys::Win32::Security::{EqualSid, GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION};
+    use windows_sys::Win32::System::IO::CancelIoEx;
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT, WaitNamedPipeW,
     };
-    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::System::Threading::{
+        CreateMutexW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     use super::{Message, OnMessage};
+
+    /// 管道上的一次收发最多等这么久：对方卡住（被挂起、停在调试器里）时取消，不一直等下去
+    const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// 句柄跨线程用：只在一个线程里用它
     struct Handle(HANDLE);
@@ -532,7 +547,7 @@ mod windows {
         name: String,
     }
 
-    pub struct Secondary(File);
+    pub struct Secondary(Arc<File>);
 
     pub struct Listening {
         name: String,
@@ -543,17 +558,108 @@ mod windows {
         text.encode_utf16().chain(Some(0)).collect()
     }
 
-    /// 互斥量和管道的名字：管道是全机器的，名字里带上用户
-    fn names(id: &str) -> (String, String) {
-        let user = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap_or_default(), std::env::var("USERNAME").unwrap_or_default());
-        let key = format!("{:016x}", super::hash(&format!("{id}\0{user}")));
-        (format!("Local\\aureole-{key}"), format!(r"\\.\pipe\aureole-{key}"))
+    /// 进程令牌里的用户（`TOKEN_USER`）：按 8 字节对齐的缓冲区，里面的 SID 指针指向缓冲区自己
+    struct TokenUserBuffer(Vec<u64>);
+
+    impl TokenUserBuffer {
+        /// 进程（句柄要有查询的权限）的用户；拿不到时是 `None`
+        fn of(process: HANDLE) -> Option<Self> {
+            // SAFETY: 令牌句柄用完关掉；先问大小，再写进够大的、对齐的缓冲区
+            unsafe {
+                let mut token = std::ptr::null_mut();
+                if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+                    return None;
+                }
+                let token = Handle(token);
+                let mut size = 0u32;
+                GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut size);
+                if size == 0 {
+                    return None;
+                }
+                let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+                (GetTokenInformation(token.0, TokenUser, buffer.as_mut_ptr().cast(), size, &mut size) != 0).then_some(Self(buffer))
+            }
+        }
+
+        fn sid(&self) -> PSID {
+            // SAFETY: 缓冲区是 GetTokenInformation(TokenUser) 填的，开头是 TOKEN_USER，按 8 字节对齐
+            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
     }
 
-    fn create_pipe(name: &str, first: bool) -> io::Result<Handle> {
+    // SAFETY: 缓冲区只读；里面的指针指向它自己的堆内存，跟着它走
+    unsafe impl Send for TokenUserBuffer {}
+    // SAFETY: 同上，只读
+    unsafe impl Sync for TokenUserBuffer {}
+
+    /// 这个进程的用户和它的 SID 的文字形式（`S-1-5-21-…`）
+    fn own_user() -> io::Result<&'static (TokenUserBuffer, String)> {
+        static USER: OnceLock<Option<(TokenUserBuffer, String)>> = OnceLock::new();
+        let user = USER.get_or_init(|| {
+            // SAFETY: 当前进程的伪句柄总是有效、不用关；转出来的字符串用 LocalFree 还掉
+            unsafe {
+                let user = TokenUserBuffer::of(GetCurrentProcess())?;
+                let mut text = std::ptr::null_mut();
+                if ConvertSidToStringSidW(user.sid(), &mut text) == 0 || text.is_null() {
+                    return None;
+                }
+                let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+                let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+                LocalFree(text.cast());
+                Some((user, sid))
+            }
+        });
+        user.as_ref().ok_or_else(|| io::Error::other("拿不到这个进程的用户"))
+    }
+
+    /// 这个进程所在的登录会话
+    fn session() -> u32 {
+        let mut session = 0u32;
+        // SAFETY: 只写栈上的整数
+        unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
+        session
+    }
+
+    /// 互斥量和管道的名字：按标识、用户（SID，不是可以改的环境变量）分开；互斥量在会话自己的名字空间里（`Local\`），
+    /// 管道是全机器的，名字里再带上会话编号（同一个用户在两个会话里登录时各管各的）
+    pub(super) fn names_for(id: &str, user: &str, session: u32) -> (String, String) {
+        let key = format!("{:016x}", super::hash(&format!("{id}\0{user}")));
+        (format!("Local\\aureole-{key}"), format!(r"\\.\pipe\aureole-{key}-{session}"))
+    }
+
+    fn names(id: &str) -> io::Result<(String, String)> {
+        Ok(names_for(id, &own_user()?.1, session()))
+    }
+
+    /// 只有这个用户能用的安全描述（`D:P(A;;GA;;;<SID>)`）：别的用户打不开互斥量、连不上管道，也建不了同名的实例
+    struct OnlyUser(PSECURITY_DESCRIPTOR);
+
+    impl OnlyUser {
+        fn new() -> io::Result<Self> {
+            let sddl = wide(&format!("D:P(A;;GA;;;{})", own_user()?.1));
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: 描述以 0 结尾；转出来的安全描述由 Drop 用 LocalFree 还掉
+            let ok = unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) };
+            if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(Self(descriptor)) }
+        }
+
+        fn attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: self.0, bInheritHandle: 0 }
+        }
+    }
+
+    impl Drop for OnlyUser {
+        fn drop(&mut self) {
+            // SAFETY: 安全描述是 ConvertStringSecurityDescriptorToSecurityDescriptorW 分配的，只还一次
+            unsafe { LocalFree(self.0) };
+        }
+    }
+
+    fn create_pipe(name: &str, first: bool, security: &OnlyUser) -> io::Result<Handle> {
         let mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
         let name = wide(name);
-        // SAFETY: 名字以 0 结尾；没有安全属性（默认：只有创建者能写）
+        let attributes = security.attributes();
+        // SAFETY: 名字以 0 结尾；安全属性和它指向的安全描述活到调用结束
         let pipe = unsafe {
             CreateNamedPipeW(
                 name.as_ptr(),
@@ -563,59 +669,113 @@ mod windows {
                 4096,
                 4096,
                 0,
-                std::ptr::null(),
+                &attributes,
             )
         };
         if pipe == INVALID_HANDLE_VALUE { Err(io::Error::last_os_error()) } else { Ok(Handle(pipe)) }
     }
 
     pub fn try_primary(id: &str) -> io::Result<Option<Primary>> {
-        let (mutex_name, name) = names(id);
+        let (mutex_name, name) = names(id)?;
+        let security = OnlyUser::new()?;
+        let attributes = security.attributes();
         let wide_name = wide(&mutex_name);
-        // SAFETY: 名字以 0 结尾；GetLastError 紧跟在 CreateMutexW 后面
-        let (mutex, existed) = unsafe {
-            let mutex = CreateMutexW(std::ptr::null(), 0, wide_name.as_ptr());
-            (mutex, GetLastError() == ERROR_ALREADY_EXISTS)
+        // SAFETY: 名字以 0 结尾，安全属性活到调用结束；GetLastError 紧跟在 CreateMutexW 后面
+        let (mutex, error) = unsafe {
+            let mutex = CreateMutexW(&attributes, 0, wide_name.as_ptr());
+            (mutex, GetLastError())
         };
         if mutex.is_null() {
-            return Err(io::Error::last_os_error());
+            // 别的权限建的（以管理员身份运行的实例）：打不开，也就是已经有实例了
+            if error == ERROR_ACCESS_DENIED {
+                return Ok(None);
+            }
+            return Err(io::Error::from_raw_os_error(error as i32));
         }
         let mutex = Handle(mutex);
-        if existed {
+        if error == ERROR_ALREADY_EXISTS {
             return Ok(None);
         }
-        let pipe = create_pipe(&name, true)?;
+        let pipe = create_pipe(&name, true, &security)?;
         Ok(Some(Primary { mutex, pipe, name }))
     }
 
-    pub fn try_connect(id: &str) -> Option<Secondary> {
-        let name = names(id).1;
-        match OpenOptions::new().read(true).write(true).open(&name) {
+    /// 打开管道（客户端）：只许服务端认出是谁（`SECURITY_IDENTIFICATION`），不许它冒充这个进程
+    fn open_pipe(name: &str) -> io::Result<File> {
+        OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(name)
+    }
+
+    /// 进程 `pid` 是不是这个用户的（拿不到它的令牌时不算）
+    fn same_user(pid: u32) -> bool {
+        let Ok((own, _)) = own_user() else { return false };
+        // SAFETY: 进程句柄用完关掉；两个 SID 都指向活着的缓冲区
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return false;
+            }
+            let process = Handle(process);
+            TokenUserBuffer::of(process.0).is_some_and(|theirs| EqualSid(theirs.sid(), own.sid()) != 0)
+        }
+    }
+
+    /// 连上第一个实例的通道。还没开始监听、正忙、正在退出时是 `Ok(None)`（隔一会儿再试）；
+    /// 连上了却不是这个用户的进程开的、或者权限不够连不上（第一个实例以管理员身份运行）时是错误，不再试
+    pub fn try_connect(id: &str) -> io::Result<Option<Secondary>> {
+        let name = names(id)?.1;
+        match open_pipe(&name) {
             Ok(file) => {
                 let mut pid = 0u32;
-                // SAFETY: 句柄是刚打开的管道；允许第一个实例把窗口带到最前面（这个进程是用户刚启动的，有这个权利）
-                unsafe {
-                    if GetNamedPipeServerProcessId(file.as_raw_handle() as HANDLE, &mut pid) != 0 {
-                        AllowSetForegroundWindow(pid);
-                    }
+                // SAFETY: 句柄是刚打开的管道，只写栈上的整数
+                let known = unsafe { GetNamedPipeServerProcessId(file.as_raw_handle() as HANDLE, &mut pid) } != 0;
+                if !known || !same_user(pid) {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, "通道不是这个用户的进程开的（或者认不出来），不转发"));
                 }
-                Some(Secondary(file))
+                // SAFETY: 允许第一个实例把窗口带到最前面（这个进程是用户刚启动的，有这个权利）
+                unsafe { AllowSetForegroundWindow(pid) };
+                Ok(Some(Secondary(Arc::new(file))))
             }
-            Err(e) => {
-                if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) {
-                    let name = wide(&name);
-                    // SAFETY: 名字以 0 结尾
-                    unsafe { WaitNamedPipeW(name.as_ptr(), 500) };
-                }
-                None
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                let name = wide(&name);
+                // SAFETY: 名字以 0 结尾
+                unsafe { WaitNamedPipeW(name.as_ptr(), 500) };
+                Ok(None)
             }
+            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("连不上第一个实例的通道（权限不同，比如它以管理员身份运行）：{e}")))
+            }
+            Err(_) => Ok(None),
         }
+    }
+
+    /// 看着一次收发：超过 [`IO_TIMEOUT`] 还没做完（这个守卫还没释放）时取消管道上进行中的读写，读写返回错误
+    struct Watchdog {
+        _done: Sender<()>,
+    }
+
+    fn watchdog(file: &Arc<File>) -> Watchdog {
+        let (done, finished) = channel::<()>();
+        let file = file.clone();
+        let _ = std::thread::Builder::new().name("single-instance: timeout".into()).spawn(move || {
+            if finished.recv_timeout(IO_TIMEOUT) == Err(RecvTimeoutError::Timeout) {
+                // SAFETY: 句柄活着（`file` 拿着）；取消这个进程在它上面进行中的读写
+                unsafe { CancelIoEx(file.as_raw_handle() as HANDLE, std::ptr::null()) };
+            }
+        });
+        Watchdog { _done: done }
     }
 
     pub fn listen(primary: Primary, stop: Arc<AtomicBool>, on_message: OnMessage) -> Listening {
         let Primary { mutex, pipe, name } = primary;
         let pipe_name = name.clone();
         let spawned = std::thread::Builder::new().name("single-instance".into()).spawn(move || {
+            let security = match OnlyUser::new() {
+                Ok(security) => security,
+                Err(e) => {
+                    tracing::warn!("单实例：建不了管道的安全描述，不再接收：{e}");
+                    return;
+                }
+            };
             let mut pipe = Some(pipe);
             loop {
                 let Some(current) = pipe.take() else { break };
@@ -629,16 +789,18 @@ mod windows {
                     let raw = current.0 as RawHandle;
                     std::mem::forget(current);
                     // SAFETY: 句柄的所有权转给 File
-                    let mut file = unsafe { File::from_raw_handle(raw) };
+                    let file = Arc::new(unsafe { File::from_raw_handle(raw) });
                     let on_message = on_message.clone();
                     let _ = std::thread::Builder::new().name("single-instance: message".into()).spawn(move || {
-                        if super::serve(&mut file, &on_message).is_ok() {
+                        let _watch = watchdog(&file);
+                        let mut stream: &File = &file;
+                        if super::serve(&mut stream, &on_message).is_ok() {
                             // 等对方读完确认再断开
                             let _ = file.sync_all();
                         }
                     });
                 }
-                match create_pipe(&pipe_name, false) {
+                match create_pipe(&pipe_name, false, &security) {
                     Ok(next) => pipe = Some(next),
                     Err(e) => {
                         tracing::warn!("单实例：创建管道失败，不再接收：{e}");
@@ -655,14 +817,17 @@ mod windows {
 
     pub fn stop(listening: &mut Listening) {
         // 连一下，让等在 ConnectNamedPipe 上的线程醒来看到停止标记
-        let _ = OpenOptions::new().read(true).write(true).open(&listening.name);
+        let _ = open_pipe(&listening.name);
         listening.mutex = None;
     }
 
     pub fn send(secondary: Secondary, message: &Message) -> io::Result<()> {
-        let mut file = secondary.0;
-        super::exchange(&mut file, message)
+        let file = secondary.0;
+        let _watch = watchdog(&file);
+        let mut stream: &File = &file;
+        super::exchange(&mut stream, message)
     }
+
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -682,8 +847,8 @@ mod unsupported {
         Ok(Some(Primary))
     }
 
-    pub fn try_connect(_id: &str) -> Option<Secondary> {
-        None
+    pub fn try_connect(_id: &str) -> io::Result<Option<Secondary>> {
+        Ok(None)
     }
 
     pub fn listen(_primary: Primary, _stop: Arc<AtomicBool>, _on_message: OnMessage) -> Listening {

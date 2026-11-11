@@ -3,6 +3,7 @@
 //! 只用 [`Session`] 的公开接口。要换颜色、图片、文字、加页时用这里的设置；要完全不一样时自己写一个 `fn(Session) -> Element`。
 
 use aureole::prelude::*;
+use aureole::defaults::palette;
 use aureole::{ImageFit, ImageSource, image};
 
 use crate::engine::Activity;
@@ -225,13 +226,21 @@ impl Wizard {
     pub fn build(self, session: Session) -> Element {
         let look = Look::new(self.accent);
         let texts = std::rc::Rc::new(self.texts);
-        let side = side_panel(session, self.accent, self.image, self.tagline);
+        let icon = if self.image.is_none() { app_icon(session) } else { None };
+        let side = side_panel(session, self.accent, self.image, icon, self.tagline);
         let body: Element = match session.mode() {
             Mode::Install => install_flow(session, look.clone(), texts.clone(), self.license, self.pages),
             Mode::Uninstall => uninstall_flow(session, look.clone(), texts.clone()),
         };
         // 右边的最小宽度是 0：长的错误信息在里面折行，不把左边一栏挤窄
-        row().width(pct(100)).height(pct(100)).background(Color::WHITE).child(side).child(column().grow(1.0).min_width(0).padding(28).gap(14).child(body))
+        // 底色、文字颜色跟着应用的外观（深色时是深底浅字）：标题、复选框的文字也是跟着外观变的
+        row()
+            .width(pct(100))
+            .height(pct(100))
+            .background(|| palette().background)
+            .color(|| palette().text)
+            .child(side)
+            .child(column().grow(1.0).min_width(0).padding(28).gap(14).child(body))
     }
 }
 
@@ -290,24 +299,28 @@ fn breakable_path(message: &str) -> String {
     message.replace('\\', "\\\u{200b}")
 }
 
-/// 左边一栏：图，或者主色上的第一个字、应用名、版本
-fn side_panel(session: Session, accent: Color, picture: Option<ImageSource>, tagline: Option<String>) -> Element {
+/// 左边一栏：图，或者主色上的应用图标（没有图标时是名字的第一个字）、应用名、版本
+fn side_panel(session: Session, accent: Color, picture: Option<ImageSource>, icon: Option<ImageSource>, tagline: Option<String>) -> Element {
     let manifest = session.manifest();
     let panel = column().width(176).shrink(0).height(pct(100)).background(accent).padding(24).gap(10);
     if let Some(picture) = picture {
         return column().width(176).shrink(0).height(pct(100)).background(accent).child(image(picture).width(pct(100)).height(pct(100)).fit(ImageFit::Cover));
     }
-    let initial: String = manifest.name.chars().take(1).collect();
-    let panel = panel
-        .child(
+    let badge = match icon {
+        Some(icon) => image(icon).size(56, 56).fit(ImageFit::Contain).name("应用图标"),
+        None => {
+            let initial: String = manifest.name.chars().take(1).collect();
             row()
                 .size(56, 56)
                 .radius(14)
                 .background(Color::WHITE.with_alpha(0.2))
                 .align(Align::Center)
                 .justify(Justify::Center)
-                .child(text(initial).font_size(28).color(Color::WHITE)),
-        )
+                .child(text(initial).font_size(28).color(Color::WHITE))
+        }
+    };
+    let panel = panel
+        .child(badge)
         .child(text(manifest.name.clone()).font_size(18).color(Color::WHITE).margin_top(6))
         .child(text(manifest.version.clone()).font_size(12).color(Color::WHITE.with_alpha(0.75)));
     match tagline {
@@ -321,7 +334,54 @@ fn title(text_value: String) -> Element {
 }
 
 fn muted(text_value: impl Into<String>) -> Element {
-    text(text_value.into()).font_size(13).color(Color::hex(0x5b6470))
+    text(text_value.into()).font_size(13).color(|| palette().muted)
+}
+
+/// 出错的说明：浅色外观上深红，深色外观上浅一点的红（深底上看得清）
+fn danger() -> Color {
+    match aureole::appearance() {
+        aureole::Appearance::Dark => Color::hex(0xff8a80),
+        _ => Color::hex(0xb3261e),
+    }
+}
+
+/// 应用的图标：安装时从安装包里解出来，卸载时读安装目录里的那份。Windows 的 .ico 里挑最大的一张 PNG
+/// （打包工具写的每一张都是 PNG）。没有图标、读不出来时为 `None`（左边一栏画名字的第一个字）
+fn app_icon(session: Session) -> Option<ImageSource> {
+    let path = session.manifest().icon.as_deref()?;
+    let bytes = match session.mode() {
+        Mode::Install => {
+            let entry = session.manifest().files.iter().find(|f| f.path == path)?;
+            let mut bytes = Vec::with_capacity(entry.size as usize);
+            session.package().extract(entry, &mut bytes, &crate::CancelToken::default(), |_| {}).ok()?;
+            bytes
+        }
+        Mode::Uninstall => std::fs::read(session.directory().get_untracked().join(path)).ok()?,
+    };
+    largest_png(&bytes).map(|png| ImageSource::bytes(png.to_vec()))
+}
+
+/// PNG 本身原样给；.ico 里挑最大的一张 PNG（老式的位图项跳过）。都不是时为 `None`
+fn largest_png(bytes: &[u8]) -> Option<&[u8]> {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.starts_with(PNG) {
+        return Some(bytes);
+    }
+    if bytes.get(..4)? != [0, 0, 1, 0] {
+        return None;
+    }
+    let count = u16::from_le_bytes([*bytes.get(4)?, *bytes.get(5)?]) as usize;
+    (0..count)
+        .filter_map(|i| {
+            let entry = bytes.get(6 + 16 * i..6 + 16 * (i + 1))?;
+            let word = |at: usize| u32::from_le_bytes([entry[at], entry[at + 1], entry[at + 2], entry[at + 3]]) as usize;
+            let data = bytes.get(word(12)..word(12).checked_add(word(8))?)?;
+            // 宽度这一字节是 0 表示 256
+            let width = if entry[0] == 0 { 256 } else { u32::from(entry[0]) };
+            data.starts_with(PNG).then_some((width, data))
+        })
+        .max_by_key(|(width, _)| *width)
+        .map(|(_, data)| data)
 }
 
 /// 底部的按钮：靠右一排，把上面撑开
@@ -350,7 +410,7 @@ fn progress_page(session: Session, look: &Look, texts: &std::rc::Rc<Texts>, head
         .gap(14)
         .child(title(heading))
         .child(progress_bar(move || session.progress().get().fraction).fill_style(&fill).build().width(pct(100)).name("进度条"));
-    let page = page.child(text(move || activity_text(&session.progress().get().activity, &activity_texts)).font_size(13).color(Color::hex(0x5b6470)).max_lines(1).name("正在做什么"));
+    let page = page.child(text(move || activity_text(&session.progress().get().activity, &activity_texts)).font_size(13).color(|| palette().muted).max_lines(1).name("正在做什么"));
     if can_cancel { page.child(footer().child(look.secondary(&texts.cancel, move || session.cancel()))) } else { page }
 }
 
@@ -437,7 +497,7 @@ fn install_flow(session: Session, look: Look, texts: std::rc::Rc<Texts>, license
                 .child(text(move || match session.state().get() {
                     State::Failed { message, .. } => breakable_path(&message),
                     _ => String::new(),
-                }).font_size(13).color(Color::hex(0xb3261e)).name("原因"))
+                }).font_size(13).color(danger).name("原因"))
                 .child(footer().child(look.secondary(&texts.close, move || session.finish())).child(look.primary(&texts.retry, move || session.start())))
         }
     };
@@ -527,7 +587,7 @@ fn uninstall_flow(session: Session, look: Look, texts: std::rc::Rc<Texts>) -> El
                 .child(text(move || match session.state().get() {
                     State::Failed { message, .. } => message,
                     _ => String::new(),
-                }).font_size(13).color(Color::hex(0xb3261e)).name("原因"))
+                }).font_size(13).color(danger).name("原因"))
                 .child(footer().child(look.secondary(&texts.close, move || session.finish())).child(look.primary(&texts.retry, move || session.start())))
         }
     };

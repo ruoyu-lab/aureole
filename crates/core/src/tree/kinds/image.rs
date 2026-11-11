@@ -20,23 +20,13 @@ impl ElementKind for ImageBlock {
     }
 
     fn paint(&mut self, cx: &mut PaintContext) {
-        let a = cx.area;
-        let paint = &cx.tree.nodes[cx.id].paint;
-        let inset = (a.content.x - a.bounds.x).min(a.content.y - a.bounds.y);
-        let area = ImageArea {
-            bounds: a.bounds,
-            content: a.content,
-            local: a.local,
-            opacity: a.opacity,
-            radius: paint.radius,
-            inner_radius: (paint.radius - inset).max(0.0),
-            border: (paint.border_width > 0.0 && !paint.border_color.is_transparent()).then(|| (paint.border_width, paint.border_fill())),
-        };
+        let area = image_area(cx.tree, cx.id, cx.area);
         #[cfg(feature = "svg")]
         if let Some(document) = self.document() {
+            let a = cx.area;
             let start = cx.list.quads.len();
             let target = crate::image::SvgTarget {
-                color: paint.color.clone(),
+                color: cx.tree.nodes[cx.id].paint.color.clone(),
                 raster: cx.tree.text.raster(),
                 images: cx.tree.images.system(),
                 list: cx.list,
@@ -67,5 +57,20 @@ impl ElementKind for ImageBlock {
         if let Some(document) = self.document() {
             info.fields.push(("svg_paths", document.paths.to_string()));
         }
+    }
+}
+
+/// 图片（和外部纹理）铺在哪：元素的范围、内容区、变换、透明度、圆角（内容区的圆角是元素的圆角减去内边距）、边框
+pub(crate) fn image_area(tree: &crate::tree::Tree, id: crate::tree::NodeId, a: &crate::tree::ContentArea) -> ImageArea {
+    let paint = &tree.nodes[id].paint;
+    let inset = (a.content.x - a.bounds.x).min(a.content.y - a.bounds.y);
+    ImageArea {
+        bounds: a.bounds,
+        content: a.content,
+        local: a.local,
+        opacity: a.opacity,
+        radius: paint.radius,
+        inner_radius: (paint.radius - inset).max(0.0),
+        border: (paint.border_width > 0.0 && !paint.border_color.is_transparent()).then(|| (paint.border_width, paint.border_fill())),
     }
 }

@@ -92,6 +92,9 @@ struct State {
     /// 挂着菜单栏的窗口（Windows）
     #[cfg(target_os = "windows")]
     windows: Vec<isize>,
+    /// 菜单栏按什么深浅画（窗口 → 是不是深色，Windows）：设过的才有，没变时不再设
+    #[cfg(target_os = "windows")]
+    themes: HashMap<isize, bool>,
     tray: Option<tray_icon::TrayIcon>,
     tray_items: HashMap<MenuItemId, Item>,
 }
@@ -270,6 +273,12 @@ pub(crate) mod bar {
             if let Err(error) = unsafe { bar.init_for_hwnd(hwnd) } {
                 tracing::error!("菜单栏挂到窗口上失败：{error}");
             }
+            // 新的菜单栏按原来设过的深浅画
+            if let Some(dark) = STATE.with(|s| s.borrow().themes.get(&hwnd).copied()) {
+                let theme = if dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
+                // SAFETY: 同上，窗口还在，刚挂上这个菜单栏
+                let _ = unsafe { bar.set_theme_for_hwnd(hwnd, theme) };
+            }
         }
         drop(old);
         Ok(())
@@ -303,6 +312,7 @@ pub(crate) mod bar {
             let bar = STATE.with(|s| {
                 let mut s = s.borrow_mut();
                 s.windows.retain(|h| *h != hwnd);
+                s.themes.remove(&hwnd);
                 s.bar.clone()
             });
             if let Some(bar) = bar {
@@ -313,30 +323,58 @@ pub(crate) mod bar {
         #[cfg(not(target_os = "windows"))]
         let _ = window;
     }
+
+    /// 窗口外观的深浅变了（应用固定了深浅、或者跟着系统变了）：挂在它上面的菜单栏按同样的深浅画（Windows）。
+    /// 没挂菜单栏的窗口、深浅没变时什么都不做。还没显示的窗口也不换：muda 换深浅时模拟一次失去、重新获得激活来重画菜单栏，
+    /// 窗口还没显示时最后留下的是"不激活"，标题栏会画成灰的；窗口显示以后运行时按外观再设一次
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_theme(window: &dyn HasWindowHandle, dark: bool) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+        let Some(hwnd) = super::hwnd(window) else { return };
+        // SAFETY: 只读窗口的状态；句柄来自活着的窗口
+        if unsafe { IsWindowVisible(hwnd as _) } == 0 {
+            return;
+        }
+        let bar = STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.windows.contains(&hwnd) || s.themes.get(&hwnd) == Some(&dark) {
+                return None;
+            }
+            s.themes.insert(hwnd, dark);
+            s.bar.clone()
+        });
+        if let Some(bar) = bar {
+            let theme = if dark { muda::MenuTheme::Dark } else { muda::MenuTheme::Light };
+            // SAFETY: 窗口还挂着菜单栏（关窗前 detach 会把它从表里去掉），没销毁
+            let _ = unsafe { bar.set_theme_for_hwnd(hwnd, theme) };
+        }
+    }
 }
 
 /// Windows 的消息钩子：分发消息之前把菜单快捷键翻译成菜单命令，否则快捷键不起作用。翻译了返回 `true`，
 /// 这条消息就不再分发。
 ///
-/// 菜单命令发给挂着菜单栏的窗口：按键落在没有菜单栏的窗口（无边框窗口）里时，转给第一个有菜单栏的窗口，
-/// 和 macOS 上菜单快捷键对所有窗口都起作用一致；一个有菜单栏的窗口都没有时不翻译（不吞掉按键）
+/// 只翻译落在挂着菜单栏的窗口里的按键（消息的目标是它，或者是它的子窗口）。没挂菜单栏的窗口（隐藏了标题栏、无边框）里
+/// 不翻译：按键照常交给窗口，运行时把菜单项的快捷键另外登记成了全应用的快捷键，在那里起作用
 #[cfg(target_os = "windows")]
 pub(crate) fn translate_accelerator(msg: *const std::ffi::c_void) -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MSG, TranslateAcceleratorW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, MSG, TranslateAcceleratorW};
     // 钩子在消息循环里调用，不会碰上正借着的状态；万一碰上了，这条消息不翻译
     let found = STATE.with(|s| {
         let s = s.try_borrow().ok()?;
         let haccel = s.bar.as_ref()?.haccel();
+        if haccel == 0 {
+            return None;
+        }
         let msg = msg.cast::<MSG>();
-        // SAFETY: winit 传进来的是消息循环里正要分发的 MSG
-        let target = unsafe { (*msg).hwnd } as isize;
-        let target = if s.windows.contains(&target) { target } else { s.windows.first().copied()? };
-        Some((haccel, target, msg))
+        // SAFETY: winit 传进来的是消息循环里正要分发的 MSG；窗口句柄可以是空的（线程消息），那时 GetAncestor 返回空
+        let target = unsafe { GetAncestor((*msg).hwnd, GA_ROOT) } as isize;
+        s.windows.contains(&target).then_some((haccel, target, msg))
     });
     let Some((haccel, target, msg)) = found else { return false };
     // SAFETY: msg 同上，是有效的 MSG；target 是还挂着菜单栏的窗口（关窗前 detach 会把它从表里去掉），
     // haccel 是菜单栏自己的快捷键表，菜单栏存在状态里一直活着
-    unsafe { TranslateAcceleratorW(target as _, haccel as _, msg) == 1 }
+    unsafe { TranslateAcceleratorW(target as _, haccel as _, msg) != 0 }
 }
 
 /// 托盘

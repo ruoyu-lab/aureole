@@ -23,7 +23,9 @@ struct ShaderInput {
 fn custom_fragment(in: VsOut) -> vec4<f32> {
     let p = in.local;
     let d = sd_rounded_rect(p, in.half_size, corner_radius(p, in.radii));
-    let aa = max(length(vec2(dpdx(d), dpdy(d))), 1e-4);
+    // 精细的导数：只说 dpdx 时驱动可以按 2×2 的像素块算一个（DX12、Intel 的 Vulkan 这样做），距离场在角上分段变化，
+    // 同一块里的像素落在角的两侧时导数算偏，角附近的像素覆盖率不到 1
+    let aa = max(length(vec2(dpdxFine(d), dpdyFine(d))), 1e-4);
     var clip = 1.0;
     if in.clip != 0u {
         clip = clip_coverage(in.clip, screen_position(in.position));

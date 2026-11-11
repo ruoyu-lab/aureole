@@ -9,7 +9,7 @@
 
 use reactive::batch;
 
-use super::super::interaction::{DRAG_THRESHOLD, Drag, VELOCITY_WINDOW, distance, sub};
+use super::super::interaction::{Drag, VELOCITY_WINDOW, distance, drag_threshold, sub};
 use super::super::router::Press;
 use super::super::{NodeId, Tree, TreeRef, drag_drop};
 use super::HitPath;
@@ -237,7 +237,9 @@ fn press(tree: &TreeRef, button: MouseButton) {
         dismiss_outside(tree);
     }
     match button {
-        MouseButton::Left if control => context_menu(tree, prevented),
+        MouseButton::Left if control => {
+            context_menu(tree, prevented);
+        }
         MouseButton::Left => {
             tree.borrow_mut().router.set_press(Some(Press { path: hovered.clone(), prevented }));
             // 按在窗口的拖动区域上：不动焦点，和按在系统的标题栏上一样
@@ -249,7 +251,11 @@ fn press(tree: &TreeRef, button: MouseButton) {
                 window_drag::pressed(tree, clicks, double);
             }
         }
-        MouseButton::Right => context_menu(tree, prevented),
+        MouseButton::Right => {
+            let clicked = context_menu(tree, prevented);
+            // 按在窗口的拖动区域上：松开时弹系统的窗口菜单（按下、右键点击的处理器都能取消）
+            window_drag::secondary_pressed(tree, prevented | clicked);
+        }
         MouseButton::Middle => tree.borrow_mut().router.set_middle(Some(Press { path: hovered, prevented })),
         MouseButton::Back | MouseButton::Forward | MouseButton::Other(_) => {}
     }
@@ -273,17 +279,19 @@ pub(super) fn focus_and_select(tree: &TreeRef, prevented: Builtin, clicks: u32) 
     run_focus_callbacks(callbacks);
 }
 
-/// 右键（和 macOS 上的 Control+左键、手指长按）按下的内置行为：右键点击，交给指针下最内层的元素冒泡
-pub(super) fn context_menu(tree: &TreeRef, prevented: Builtin) {
+/// 右键（和 macOS 上的 Control+左键、手指长按）按下的内置行为：右键点击，交给指针下最内层的元素冒泡。
+/// 返回右键点击的处理器取消了哪些内置行为（没有合成时是空的）
+pub(super) fn context_menu(tree: &TreeRef, prevented: Builtin) -> Builtin {
     if prevented.contains(Builtin::CONTEXT_MENU) {
-        return;
+        return Builtin::empty();
     }
     let target = {
         let t = tree.borrow();
         t.pointer_target().filter(|_| t.router.pointer().is_some())
     };
-    if let Some(target) = target {
-        click(tree, target, EventType::SecondaryClick, MouseButton::Right, 1);
+    match target {
+        Some(target) => click(tree, target, EventType::SecondaryClick, MouseButton::Right, 1),
+        None => Builtin::empty(),
     }
 }
 
@@ -317,6 +325,9 @@ pub(super) fn release(tree: &TreeRef, button: MouseButton) {
     if button == MouseButton::Left {
         clear_window_drag(tree);
         before_release(tree);
+    }
+    if button == MouseButton::Right {
+        window_drag::secondary_released(tree);
     }
     let routed = tree.borrow().routed_pointer(PointerEventKind::Up, Some(button), tree.borrow().router.last_clicks());
     let prevented = match routed {
@@ -468,7 +479,7 @@ fn drag_move(tree: &TreeRef, point: Option<[f32; 2]>) -> bool {
             return started;
         };
         if !drag.started {
-            if distance(point, drag.start) < DRAG_THRESHOLD {
+            if distance(point, drag.start) < drag_threshold() {
                 t.router.set_drag(Some(drag));
                 return false;
             }
@@ -561,7 +572,7 @@ pub(super) fn start_drag(tree: &TreeRef, mut drag: Drag, point: [f32; 2], pan: O
         let mut cancel = tree.borrow().drag_event(&drag, GesturePhase::Cancel, [0.0; 2], now);
         deliver(tree, owner, EventType::Drag, at, &mut cancel);
         end_press(tree);
-        drag_drop::begin_out(tree, owner, point);
+        drag_drop::begin_out(tree, owner, point, None);
         return true;
     }
     let start = drag.start;
@@ -609,17 +620,18 @@ pub(super) fn end_press(tree: &TreeRef) {
     }
 }
 
-/// 在应用里拖着能拖到应用外面的元素出了窗口：应用里的拖放取消（影子直接去掉），交给系统接着拖
-fn hand_off(tree: &TreeRef) {
-    let Some((node, point)) = ({
+/// 在应用里拖着元素出了窗口（能拖到应用外面，或者指针下面是同一个应用的另一个窗口）：应用里的拖放取消（影子直接去掉），
+/// 交给系统接着拖，带着拖放的数据
+pub(crate) fn hand_off(tree: &TreeRef) {
+    let Some((node, point, data)) = ({
         let t = tree.borrow();
-        t.router.drag().and_then(Drag::owner).zip(t.router.pointer())
+        t.router.drag().and_then(Drag::owner).zip(t.router.pointer()).map(|(node, point)| (node, point, t.drag_drop.data()))
     }) else {
         return;
     };
     finish_drag_drop(tree, Finish::HandOff);
     end_press(tree);
-    drag_drop::begin_out(tree, node, point);
+    drag_drop::begin_out(tree, node, point, data);
 }
 
 /// 元素之间的拖放怎么结束

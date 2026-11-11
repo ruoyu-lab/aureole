@@ -48,7 +48,7 @@ pub use color::{BT2020_TO_SRGB, Color, P3_TO_SRGB, SRGB_TO_P3, WideColor, decode
 pub use display_list::{DisplayList, EMPTY_BOUNDS, Group, GroupMask, QuadEffect};
 pub use filter::{BlendMode, ColorMatrix};
 pub use gradient::{ColorSpace, GradientPaint, GradientShape};
-pub use image::{IMAGE_ATLAS_ALIGN, IMAGE_ATLAS_LEVELS, ImageData, ImageEncoding, ImageLevel, ImageUpdate};
+pub use image::{EXTERNAL_TEXTURE_BASE, IMAGE_ATLAS_ALIGN, IMAGE_ATLAS_LEVELS, ImageData, ImageEncoding, ImageLevel, ImageUpdate};
 pub use limits::{max_texture_size, set_max_texture_size};
 pub use quad::{Clip, LayerTransform, Quad};
 pub use shader_feature::{FeatureRange, ShaderFeatures};

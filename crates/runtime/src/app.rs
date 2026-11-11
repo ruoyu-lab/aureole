@@ -27,8 +27,8 @@ use crate::display_color::{DisplayColor, OutputState};
 use crate::menu::{self, Menu, Tray};
 use crate::plugin::{FrameInfo, Hooks, PlatformEvent, Plugin};
 use crate::open::{self, OpenRequest, SingleInstance};
-use crate::pacing::{FramePacer, next_wake};
-use crate::render_thread::{self, RenderMsg, RenderThread};
+use crate::pacing::{FrameNow, FramePacer, next_wake};
+use crate::render_thread::{self, DrawnFrame, RenderMsg, RenderThread, ResizeSync};
 use crate::translate::{TranslateState, translate};
 use crate::window::{self, Request, UserEvent, Window, WindowHandle};
 
@@ -302,6 +302,13 @@ impl App {
         if let Some(install) = self.spawner.take() {
             install();
         }
+        // 打包时写进可执行文件的包标识符（Windows）：在建第一个窗口之前声明成进程的应用标识，任务栏分组、系统通知都认它，
+        // 不管应用是从开始菜单、双击文档、协议链接还是命令行启动的
+        if let Some(id) = platform::system::embedded_app_id()
+            && !platform::system::set_app_user_model_id(&id)
+        {
+            tracing::warn!("包标识符 {id} 设不成应用标识");
+        }
         // 单实例、命令行参数里的网址和文件：要在创建事件循环之前
         let _instance = open::startup(&self.single_instance, std::mem::take(&mut self.on_open));
         let start = Instant::now();
@@ -353,6 +360,7 @@ impl App {
         let mut runner = Runner {
             #[cfg(feature = "menus")]
             pending_menu: Some((menu, self.tray, app_name)),
+            modal_waker: frame_waker(proxy.clone()),
             proxy,
             main: Some(self.main),
             hooks: Rc::new(self.hooks),
@@ -360,9 +368,12 @@ impl App {
             windows: HashMap::new(),
             ids: HashMap::new(),
             instance,
+            all_backends: !render::only_native_backend(),
             gpu: None,
             gpu_preference: GpuPreference::from_env().unwrap_or(self.gpu),
             warned_low_power: false,
+            low_power: false,
+            low_power_checked: None,
             record: std::env::var_os("AUREOLE_RECORD").map(PathBuf::from),
         };
         event_loop.run_app(&mut runner).expect("事件循环出错");
@@ -393,6 +404,8 @@ struct Runner {
     pending_menu: Option<PendingMenu>,
     /// 无障碍适配器、帧时钟的后台线程叫醒事件循环用
     proxy: EventLoopProxy<UserEvent>,
+    /// 系统的模态循环里截止时间到了叫醒事件循环（见 [`Runner::turn`]）：和帧时钟送来的帧一样，不恢复别的窗口的时钟
+    modal_waker: std::task::Waker,
     main: Option<Window>,
     /// 插件和应用挂的钩子
     hooks: Rc<Hooks>,
@@ -400,10 +413,15 @@ struct Runner {
     windows: HashMap<WindowId, OpenWindow>,
     ids: HashMap<WindowHandle, WindowId>,
     instance: wgpu::Instance,
+    /// 实例开了全部的后端（Windows 上默认只开 DX12，找不到能用的适配器时换成全部的）
+    all_backends: bool,
     /// 所有窗口共用一个 GPU 设备，第一个窗口创建时选适配器
     gpu: Option<Arc<Gpu>>,
     gpu_preference: GpuPreference,
     warned_low_power: bool,
+    /// 系统开着低电量模式（上次问的时候），和上次问的时刻：开了、关了时换窗口的帧率（[`frame_rate`]）
+    low_power: bool,
+    low_power_checked: Option<Instant>,
     /// 环境变量 `AUREOLE_RECORD`：第一个打开的窗口把收到的输入录进这个文件
     record: Option<PathBuf>,
 }
@@ -451,12 +469,22 @@ struct WinitWindow {
     hidden_title_bar: bool,
     /// 这次输入交给系统拖动窗口了：换算的状态里按着的键要清掉
     window_dragged: Cell<bool>,
+    /// 窗口的大小真正变之前已经按这个大小出过一帧（[`watch_live_resize`]）：紧接着的 `Resized` 不用再出
+    presized: Cell<Option<PhysicalSize<u32>>>,
     /// Linux：指针在窗口边缘（指针形状是调整大小的）
     #[cfg(target_os = "linux")]
     on_resize_edge: Cell<bool>,
 }
 
 impl WinitWindow {
+    /// 再把输入法的位置交给系统一次（缩放比例变了）
+    fn refresh_ime_area(&self) {
+        if let Some(r) = self.ime.get().filter(|_| ime_allowed(self.ime.get())) {
+            let a = r.area;
+            self.window.set_ime_cursor_area(LogicalPosition::new(a.x, a.y), LogicalSize::new(a.width, a.height));
+        }
+    }
+
     fn output(&self) -> Output<'_> {
         Output { state: &self.output, window: &self.window, handle: self.handle }
     }
@@ -496,6 +524,10 @@ impl WinitWindow {
         if self.background.is_none() && backdrop.is_opaque() {
             let background = crate::title_bar::clear_color(None, backdrop);
             let _ = self.sender.send(RenderMsg::Backdrop { transparent: false, background });
+            if self.composition.is_some() {
+                let [r, g, b, _] = background.0;
+                crate::system::backend().window().set_window_background(&*self.window, Some([r, g, b]));
+            }
         }
     }
 
@@ -582,6 +614,8 @@ impl HostWindow for WinitWindow {
     fn reset_ime(&self) {
         if let Some(r) = self.ime.get().filter(|r| r.purpose != ImePurpose::Password) {
             let a = r.area;
+            // Windows 上关一次再开一次只是把输入上下文摘下又挂上，没确定的字可能留着、下一次按键接着组：先让输入法把它丢掉
+            crate::system::backend().window().cancel_ime_composition(&*self.window);
             self.window.set_ime_allowed(false);
             self.window.set_ime_allowed(true);
             self.window.set_ime_cursor_area(LogicalPosition::new(a.x, a.y), LogicalSize::new(a.width, a.height));
@@ -598,17 +632,29 @@ impl HostWindow for WinitWindow {
         self.accessibility.borrow_mut().update_if_active(|| update);
     }
 
-    /// 交给系统的拖动会话，结束时的结果下一帧交给源元素；开始不了（其他平台）时直接以 `false` 结束
+    /// 交给系统的拖动会话，结束时的结果下一帧交给源元素；开始不了（其他平台）时直接以 `false` 结束。
+    /// 元素之间拖放的数据留在进程里，会话期间拖到应用的窗口上时那里按元素之间的拖放接收（`external_drag.rs`）
     fn begin_drag_out(&self, request: DragOutRequest) {
         let at = request.at;
         // 系统的回调里不碰元素树：结果写进请求带的格子，下一帧交给源元素
         let result = request.result.clone();
-        let on_end = Box::new(move |accepted| result.set(Some(accepted)));
-        let (files, text) = (request.out.paths(), request.out.text_content());
-        if let Err(error) = crate::system::backend().window().begin_drag_out(&*self.window, files, text, at, on_end) {
+        crate::external_drag::carry(request.data.clone());
+        let on_end = Box::new(move |accepted| {
+            crate::external_drag::carry(None);
+            result.set(Some(accepted));
+        });
+        let content = crate::clipboard::drag_content(&request.out);
+        if let Err(error) = crate::system::backend().window().begin_drag_out(&*self.window, &content, at, on_end) {
             tracing::debug!("拖不到应用外面：{error}");
+            crate::external_drag::carry(None);
             request.result.set(Some(false));
         }
+    }
+
+    /// 交给系统以后靠系统的拖放进到别的窗口：拖不出去、接不了别的内容的平台（Linux）还在窗口里拖
+    fn app_window_at(&self, point: [f32; 2]) -> bool {
+        let can = crate::system::capabilities();
+        can.supports_drag_out && can.supports_external_drop && window::app_window_at(self.handle, point)
     }
 
     fn focus_changed(&self, focused: bool) {
@@ -630,6 +676,17 @@ impl HostWindow for WinitWindow {
         }
     }
 
+    /// 在拖动区域上点了右键：弹出系统的窗口菜单（Windows）。菜单在调用里转自己的模态循环，等这次事件处理完、
+    /// 在窗口库的回调外面弹（不然菜单开着的时候窗口库把事件都攒着，画面停住）
+    fn show_window_menu(&self, at: [f32; 2]) {
+        let window = Arc::downgrade(&self.window);
+        crate::system::backend().window().run_outside_event_callback(Box::new(move || {
+            if let Some(window) = window.upgrade() {
+                window.show_window_menu(LogicalPosition::new(at[0], at[1]));
+            }
+        }));
+    }
+
     /// 双击了拖动区域：按系统设置缩放或最小化窗口
     fn perform_title_bar_double_click(&self) {
         match crate::system::backend().window().title_bar_action() {
@@ -646,13 +703,16 @@ impl HostWindow for WinitWindow {
 }
 
 impl ApplicationHandler<UserEvent> for Runner {
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        let _handling = Handling::enter();
+        self.run_deferred(event_loop);
         if matches!(cause, StartCause::ResumeTimeReached { .. }) {
             crate::performance::woke_on_schedule();
         }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _handling = Handling::enter();
         if let Some(theme) = event_loop.system_theme() {
             aureole_core::host::set_system_appearance(crate::system::reported_appearance(theme));
         }
@@ -677,6 +737,9 @@ impl ApplicationHandler<UserEvent> for Runner {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let Some(Deferred::User(event)) = defer(Deferred::User(event)) else { return };
+        let _handling = Handling::enter();
+        self.run_deferred(event_loop);
         // 收件箱里有事（投递的工作在 `about_to_wait` 里执行）、无障碍请求：界面可能要变。
         // 帧时钟送来的帧只要交出去（在 `about_to_wait` 里），不恢复别的窗口的时钟
         if !matches!(event, UserEvent::Frame) {
@@ -688,9 +751,17 @@ impl ApplicationHandler<UserEvent> for Runner {
             UserEvent::Window(id, event) => self.window_event(event_loop, id, event),
         }
         self.process(event_loop);
+        // 系统的模态循环里（Windows：拖动窗口、改窗口大小、菜单打开着）窗口库不调用 `about_to_wait`：
+        // 帧时钟送来的帧、到期的定时器、做完的任务都在这里交出去，不然拖着窗口时画面和定时器全停
+        if crate::system::backend().window().in_modal_loop() {
+            self.turn(event_loop, true);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let Some(Deferred::Window(id, event)) = defer(Deferred::Window(id, event)) else { return };
+        let _handling = Handling::enter();
+        self.run_deferred(event_loop);
         if matches!(event, WindowEvent::CursorMoved { .. }) && self.is_wheel_echo(id) {
             return;
         }
@@ -724,12 +795,83 @@ impl ApplicationHandler<UserEvent> for Runner {
 
     /// 应用退出前：插件和应用挂的退出钩子
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _handling = Handling::enter();
         self.hooks.exit();
     }
 
-    /// 一轮事件处理完：执行就绪的异步任务和到期的定时器，放下拖进来的文件，把帧时钟送到、到期的帧交出去，
-    /// 暂停空闲的时钟，然后睡到最早的截止时间（时钟、定时器、问显示器）；都没有时一直睡，直到有事件
+    /// 一轮事件处理完，见 [`Runner::turn`]
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _handling = Handling::enter();
+        self.run_deferred(event_loop);
+        self.turn(event_loop, false);
+    }
+}
+
+thread_local! {
+    /// 正在处理窗口库的事件（处理器套了几层）：这时窗口的大小变了也不提前出帧（元素树可能正借着），照旧在 `Resized` 里出
+    static HANDLING: Cell<u32> = const { Cell::new(0) };
+    /// 窗口的大小真正变之前出帧的回调（[`watch_live_resize`]）在跑时收到的窗口库事件
+    static DEFERRAL: RefCell<Deferral> = RefCell::new(Deferral::default());
+}
+
+/// 处理窗口库的事件期间拿着，见 [`HANDLING`]
+struct Handling;
+
+impl Handling {
+    fn enter() -> Self {
+        HANDLING.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+
+    /// 有处理器在跑
+    fn active() -> bool {
+        HANDLING.with(Cell::get) > 0
+    }
+}
+
+impl Drop for Handling {
+    fn drop(&mut self) {
+        HANDLING.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// 窗口的大小真正变之前出帧的回调不在窗口库的处理器里，出帧时引起的窗口事件（应用在这一帧里改了窗口的大小、标题……）
+/// 窗口库会马上交过来，元素树这时还借着：先攒着，回调完了下一次进处理器时按顺序处理（紧接着的就是 `Resized`）
+#[derive(Default)]
+struct Deferral {
+    active: bool,
+    events: Vec<Deferred>,
+}
+
+/// 攒着的窗口库事件
+enum Deferred {
+    User(UserEvent),
+    Window(WindowId, WindowEvent),
+}
+
+/// 回调在跑时把事件攒起来，返回 `None`；没在跑时原样还回去
+fn defer(event: Deferred) -> Option<Deferred> {
+    DEFERRAL.with(|deferral| {
+        let mut deferral = deferral.borrow_mut();
+        if deferral.active {
+            deferral.events.push(event);
+            None
+        } else {
+            Some(event)
+        }
+    })
+}
+
+/// 系统的模态循环里截止时间到了没有立刻处理：计时器的消息排在输入后面，最多晚这么多。
+/// 不在模态循环里时窗口库自己按截止时间醒来，模态计时器多给这点余量，平时不会先到
+const MODAL_WAKE_SLACK: Duration = Duration::from_millis(4);
+
+impl Runner {
+    /// 一轮事件处理完（窗口库的 `about_to_wait`，系统的模态循环里是收到的事件，`modal`）：执行就绪的异步任务和到期的定时器，
+    /// 放下拖进来的文件，把帧时钟送到、到期的帧交出去，暂停空闲的时钟，然后睡到最早的截止时间（时钟、定时器、问显示器）；
+    /// 都没有时一直睡，直到有事件。模态循环里窗口库不按截止时间醒来，截止时间同时交给平台的计时器：
+    /// 平时它比窗口库晚一点到期、下一轮就改掉，只有进了模态循环（这一轮之后窗口库不再转）才由它叫醒
+    fn turn(&mut self, event_loop: &ActiveEventLoop, modal: bool) {
         crate::performance::woke();
         let ran = host::run_ready_tasks();
         // 渲染线程出错后交回来的（投递过来，刚执行过）：重建
@@ -745,6 +887,22 @@ impl ApplicationHandler<UserEvent> for Runner {
             // 计时器、等刷新的后台线程送来的帧在这里交（显示链接的帧由系统的运行循环直接回调）
             w.pacer.dispatch(now);
         }
+        // macOS 的低电量模式开了、关了：窗口的帧率跟着换（开着时系统只显示每秒 60 帧，多出的白画）。
+        // 别的平台上系统不限制窗口的画面，帧率不跟着它变，不问
+        if cfg!(target_os = "macos")
+            && self.low_power_checked.is_none_or(|at| now.duration_since(at) >= LOW_POWER_CHECK)
+            && !self.windows.is_empty()
+        {
+            self.low_power_checked = Some(now);
+            let low_power = crate::system::is_low_power_mode();
+            if low_power != self.low_power {
+                self.low_power = low_power;
+                tracing::info!("低电量模式{}，窗口的帧率跟着换", if low_power { "开了" } else { "关了" });
+                for w in self.windows.values() {
+                    w.pacer.set_rate_hint(frame_rate(&w.host.window().window, low_power));
+                }
+            }
+        }
         // 连续几帧什么都没做的窗口暂停时钟：画面静止时不再被帧唤醒
         for w in self.windows.values() {
             w.maybe_sleep();
@@ -758,11 +916,25 @@ impl ApplicationHandler<UserEvent> for Runner {
             Some(at) => ControlFlow::WaitUntil(at),
             None => ControlFlow::Wait,
         });
+        let slack = if modal { Duration::ZERO } else { MODAL_WAKE_SLACK };
+        crate::system::backend().window().wake_in_modal_loop(wake.map(|at| at.saturating_duration_since(now) + slack), &self.modal_waker);
         self.process(event_loop);
     }
-}
 
-impl Runner {
+    /// 处理窗口的大小真正变之前出帧时攒下的事件（见 [`Deferral`]）
+    fn run_deferred(&mut self, event_loop: &ActiveEventLoop) {
+        let events = DEFERRAL.with(|deferral| {
+            let mut deferral = deferral.borrow_mut();
+            if deferral.active { Vec::new() } else { std::mem::take(&mut deferral.events) }
+        });
+        for event in events {
+            match event {
+                Deferred::User(event) => self.user_event(event_loop, event),
+                Deferred::Window(id, event) => self.window_event(event_loop, id, event),
+            }
+        }
+    }
+
     /// 这个指针移动是不是滚轮事件带来的、可以不要的。
     ///
     /// macOS 上窗口库处理每个滚轮事件时，先按滚轮事件自己带的位置补发一个指针移动。这个位置可能是旧的：滚轮一直滚着，
@@ -889,7 +1061,11 @@ impl Runner {
         if let Some([w, h]) = min_size {
             attributes = attributes.with_min_inner_size(LogicalSize::new(w, h));
         }
-        if fullscreen {
+        // Windows：建窗口时就全屏的话，窗口库那时记下退出全屏后恢复的大小，平台还没补上隐藏标题栏的边框、菜单栏也还没挂上，
+        // 退出全屏后内容区小一圈或者矮一条；挂上菜单栏后按要的大小再设一次，还会把全屏的窗口缩回去（窗口库仍当它是全屏）。
+        // 先不全屏，标题栏、菜单栏都弄好再进
+        let fullscreen_later = fullscreen && cfg!(target_os = "windows");
+        if fullscreen && !fullscreen_later {
             attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
         }
         // 一个窗口只能登记一个拖放目标：文件也由平台层接（见 `external_drag.rs`），窗口库的关掉
@@ -910,9 +1086,15 @@ impl Runner {
         #[cfg(feature = "menus")]
         if decorations && !hidden_title_bar {
             menu::attach_window(&window);
+            // Windows 的菜单栏长在窗口里：窗口库建窗口时还没有它，挂上以后内容区矮了一条菜单栏。窗口还没显示，按要的大小再设一次
+            #[cfg(target_os = "windows")]
+            let _ = window.request_inner_size(LogicalSize::new(size[0], size[1]));
         }
         if hidden_title_bar {
             attach_title_bar(handle, &window, title_bar_options);
+        }
+        if fullscreen_later {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
         // 外框的深浅要在设材质之前写上（Windows 的材质默认按浅色画）
         let dark = reactive::untracked(aureole_core::appearance).is_dark();
@@ -939,26 +1121,47 @@ impl Runner {
         let gpu = match self.gpu.clone() {
             Some(gpu) if !gpu.is_lost() => Ok(gpu),
             Some(lost) => lost.recover(Some(&surface)),
-            None => Gpu::request(&self.instance, Some(&surface), self.gpu_preference).map(Arc::new),
+            None => {
+                // 省电偏好下先用驱动窗口所在显示器的那块 GPU（Windows 的台式机上显示器常接在独立显卡上）
+                let display = crate::system::backend().window().display_adapter(&*window);
+                let display = display.map(|d| render::DisplayGpu { vendor: d.vendor, device: d.device });
+                let first = Gpu::request_for_display(&self.instance, Some(&surface), self.gpu_preference, display);
+                match first {
+                    // 只开了 DX12（Windows）、一个能用的适配器都没有：开全部的后端（Vulkan、GL）再来
+                    Err(error) if render::only_native_backend() && !self.all_backends => {
+                        tracing::warn!("DX12 上没有能用的 GPU，换别的图形接口再试：{error}");
+                        self.all_backends = true;
+                        self.instance = render::instance_with_all_backends(event_loop.owned_display_handle());
+                        surface = self.instance.create_surface(window.clone()).expect("创建 surface 失败");
+                        Gpu::request_for_display(&self.instance, Some(&surface), self.gpu_preference, display)
+                    }
+                    other => other,
+                }
+                .map(Arc::new)
+            }
         };
         let gpu = gpu.unwrap_or_else(|error| {
             window.set_visible(false);
             gpu_failed(&error)
         });
         self.gpu = Some(gpu.clone());
+        crate::print::set_gpu(&gpu);
         crate::performance::startup_step("选 GPU、要设备", start);
 
-        // 有材质的窗口：表面要能带透明。Windows 上 HWND 上的交换链只能不透明，换成系统合成的对象上的；
-        // 这样也不行（用的不是 DX12）时照常画不透明的背景
+        // Windows（DX12）上交换链都放在系统合成的对象上：HWND 上的交换链没赶上一次合成时，系统把旧画面拉伸到窗口的新大小，
+        // 拖着窗口的边时内容一下放大一下弹回；合成的对象上的画面不拉伸，没赶上时窗口边上露出窗口自己的位图，
+        // 位图填成背景色。有材质的窗口本来就要这样才能带透明（打开时去掉了位图，露出来的是材质）。
+        // 用的不是 DX12 时：有材质的照常画不透明的背景，不透明的照常放在 HWND 上
         let mut composition: Option<Box<dyn CompositionTarget>> = None;
-        if !backdrop.is_opaque()
+        if (!backdrop.is_opaque() || cfg!(target_os = "windows"))
             && let Some((composition_surface, target)) = composition_surface(&self.instance, &gpu, &window)
         {
             surface = composition_surface;
             composition = Some(target);
         }
         let caps = surface.get_capabilities(&gpu.adapter);
-        let can_be_transparent = render::transparent_alpha_mode(&caps).is_some();
+        // 打开时不透明的窗口留着自己的位图（Windows），之后换不成透明的
+        let can_be_transparent = render::transparent_alpha_mode(&caps).is_some() && !(cfg!(target_os = "windows") && backdrop.is_opaque());
         if !backdrop.is_opaque() && !can_be_transparent {
             tracing::warn!("这个窗口的表面不能透明，照常画不透明的背景");
             let _ = crate::system::backend().window().set_window_backdrop(&*window, WindowMaterial::Opaque);
@@ -1016,7 +1219,10 @@ impl Runner {
         let refill = Arc::new(AtomicBool::new(false));
         // 帧时钟：跟着窗口所在的显示器（macOS 的显示链接、Windows 的合成器时钟或垂直消隐、Wayland 的表面帧回调），
         // 拿不到时是计时器。等刷新的后台线程（Windows）等到一帧时叫醒事件循环；计时器要渲染线程回报呈现的时刻
-        let options = FrameClockOptions { rate: FrameRateRange::up_to(120.0), waker: Some(frame_waker(self.proxy.clone())) };
+        // 低电量模式：建窗口时问一次（之后事件循环里隔一会儿问一次）
+        self.low_power = crate::system::is_low_power_mode();
+        self.low_power_checked = Some(Instant::now());
+        let options = FrameClockOptions { rate: frame_rate(&window, self.low_power), waker: Some(frame_waker(self.proxy.clone())) };
         let clock = crate::system::backend().frame_clock(&*window, options);
         tracing::debug!(window = %initial_title, clock = clock.kind().as_str(), "帧时钟");
         let feedback = clock.present_feedback();
@@ -1046,6 +1252,7 @@ impl Runner {
             composition,
             hidden_title_bar,
             window_dragged: Cell::new(false),
+            presized: Cell::new(None),
             #[cfg(target_os = "linux")]
             on_resize_edge: Cell::new(false),
         };
@@ -1076,6 +1283,12 @@ impl Runner {
         // 时钟每帧在主线程回调：推进这个窗口的一帧 UI，把变化了的图元交给它的渲染线程
         let pacer = FramePacer::new(clock, ticker(handle, &host, &translate, &refill, &self.hooks));
         crate::external_drag::listen(&window, handle, &host, &translate, &self.proxy);
+        watch_live_resize(&window, &host, &translate, pacer.frame_now_handle());
+        // 画面在系统合成的对象上、窗口不透明：垫在下面的位图填成背景色（改大小没赶上时露出来的是它）
+        if host.window().composition.is_some() && backdrop.is_opaque() {
+            let color = crate::title_bar::clear_color(background, backdrop).0;
+            crate::system::backend().window().set_window_background(&*window, Some([color[0], color[1], color[2]]));
+        }
         let open = OpenWindow {
             handle,
             pacer,
@@ -1085,9 +1298,13 @@ impl Runner {
             translate,
             on_close_request,
         };
-        if !self.warned_low_power && crate::system::backend().environment().is_low_power_mode() {
+        if !self.warned_low_power && self.low_power {
             self.warned_low_power = true;
-            tracing::warn!("系统开着低电量模式，窗口画面会被限制在 60fps（系统设置 → 电池 → 能耗模式）");
+            if cfg!(target_os = "macos") {
+                tracing::warn!("系统开着低电量模式，窗口画面会被限制在 60fps，框架也按每秒 60 帧出（系统设置 → 电池 → 能耗模式）");
+            } else {
+                tracing::warn!("系统开着低电量模式，窗口画面会被限制在 60fps（系统设置 → 电池 → 能耗模式）");
+            }
         }
         self.ids.insert(handle, window.id());
         self.windows.insert(window.id(), open);
@@ -1225,12 +1442,18 @@ impl OpenWindow {
         }
         match event {
             WindowEvent::Resized(size) => {
-                let _ = w.sender.send(RenderMsg::Resize(physical_viewport(&w.window, size)));
+                // 大小真正变之前已经按它出过一帧、呈现了（Windows）：这里只更新状态
+                let early = w.presized.take() == Some(size);
+                if !early {
+                    let _ = w.sender.send(RenderMsg::Resize(physical_viewport(&w.window, size)));
+                }
                 sync_state(self.handle, &w.window);
                 if w.hidden_title_bar {
                     self.refresh_title_bar();
                 }
-                self.frame_for_new_size();
+                if !early {
+                    frame_for_new_size(w, &self.pacer.frame_now_handle());
+                }
             }
             WindowEvent::Moved(_) => {
                 sync_state(self.handle, &w.window);
@@ -1239,6 +1462,9 @@ impl OpenWindow {
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 w.output.borrow_mut().repoll();
+                // 输入法的位置按逻辑像素记着，交给系统时按当时的缩放比例换成物理像素：换到缩放比例不同的显示器上，
+                // 逻辑位置没变也要按新的比例再交一次，不然候选窗口差出一截
+                w.refresh_ime_area();
                 if w.hidden_title_bar {
                     self.refresh_title_bar();
                 }
@@ -1258,28 +1484,6 @@ impl OpenWindow {
             }
             WindowEvent::Focused(_) => sync_state(self.handle, &w.window),
             _ => {}
-        }
-    }
-
-    /// 窗口刚改了大小（渲染线程在等，没有用旧布局抢着画）：在这次事件里按新大小出一帧。
-    /// macOS 上这个回调在系统改窗口大小的事务里：画好的这一帧交回这里呈现，进同一个事务，画面和窗口的新大小同时生效。
-    /// 别的平台没有这样的事务，渲染线程画完直接呈现
-    fn frame_for_new_size(&self) {
-        let sender = &self.host.window().sender;
-        if !self.pacer.frame_now() {
-            tracing::debug!("改窗口大小发生在一帧里面：新布局下一帧才到");
-        }
-        if !cfg!(target_os = "macos") {
-            let _ = sender.send(RenderMsg::ResizeFrameDone(None));
-            return;
-        }
-        let (handoff, drawn) = sync_channel(0);
-        let _ = sender.send(RenderMsg::ResizeFrameDone(Some(handoff)));
-        match drawn.recv_timeout(RESIZE_FRAME_WAIT) {
-            Ok(frame) => frame.present(),
-            // 这一帧画不了（窗口看不见、表面给不出纹理、在等完整内容），渲染线程放开了这一头
-            Err(RecvTimeoutError::Disconnected) => {}
-            Err(RecvTimeoutError::Timeout) => tracing::debug!("改窗口大小：渲染线程这一帧没赶上，不等了"),
         }
     }
 
@@ -1304,6 +1508,72 @@ impl OpenWindow {
             let _ = thread.join();
         }
         self.scope.dispose();
+    }
+}
+
+/// 窗口刚改了大小（渲染线程在等，没有用旧布局抢着画）：按新大小出一帧。
+/// macOS 上这是系统改窗口大小的事务里的回调：画好的这一帧交回这里呈现，进同一个事务，画面和窗口的新大小同时生效。
+/// Windows 上这是在系统改大小的那次调用里面（窗口的大小真正变之前，见 [`watch_live_resize`]；退一步是改了以后的 `WM_SIZE`）：
+/// 等渲染线程把这一帧呈现了、GPU 画完再返回，系统接着才把新的窗口大小交给合成器。别的平台渲染线程画完直接呈现
+fn frame_for_new_size(window: &WinitWindow, frame_now: &FrameNow) {
+    let sender = &window.sender;
+    if !frame_now.run() {
+        tracing::debug!("改窗口大小发生在一帧里面：新布局下一帧才到");
+    }
+    let waited = if cfg!(target_os = "macos") {
+        let (handoff, drawn) = sync_channel(0);
+        let _ = sender.send(RenderMsg::ResizeFrameDone(Some(ResizeSync::Handoff(handoff))));
+        drawn.recv_timeout(RESIZE_FRAME_WAIT).map(DrawnFrame::present)
+    } else if cfg!(target_os = "windows") {
+        let (done, presented) = sync_channel(1);
+        let _ = sender.send(RenderMsg::ResizeFrameDone(Some(ResizeSync::Presented(done))));
+        presented.recv_timeout(RESIZE_FRAME_WAIT)
+    } else {
+        let _ = sender.send(RenderMsg::ResizeFrameDone(None));
+        return;
+    };
+    match waited {
+        Ok(()) => {}
+        // 这一帧画不了（窗口看不见、表面给不出纹理、在等完整内容），渲染线程放开了这一头
+        Err(RecvTimeoutError::Disconnected) => {}
+        Err(RecvTimeoutError::Timeout) => tracing::debug!("改窗口大小：渲染线程这一帧没赶上，不等了"),
+    }
+}
+
+/// 窗口的大小真正变之前（Windows：系统改大小的那次调用里面），先按新大小出一帧、等它呈现了再让系统改：
+/// 合成器看到的总是旧大小加旧画面，或者新大小加新画面，不会把旧画面拉伸到新大小。
+/// 正在处理窗口库的事件时（应用在处理器里改了窗口大小）、缩放比例在变时不提前，照旧在 `Resized` 里出帧。
+/// 出帧期间窗口库交来的事件先攒着（[`Deferral`]）
+fn watch_live_resize(os_window: &winit::window::Window, host: &Rc<WindowHost<WinitWindow>>, state: &Rc<RefCell<TranslateState>>, frame_now: FrameNow) {
+    let (host, state) = (Rc::downgrade(host), Rc::downgrade(state));
+    let on_resize = move |[width, height]: [u32; 2]| {
+        if Handling::active() {
+            return;
+        }
+        let (Some(host), Some(state)) = (host.upgrade(), state.upgrade()) else { return };
+        let w = host.window();
+        let size = PhysicalSize::new(width, height);
+        let inputs = {
+            let Ok(mut state) = state.try_borrow_mut() else { return };
+            if state.scale() != w.window.scale_factor() {
+                return;
+            }
+            state.time = host::clock::now_duration();
+            translate(&WindowEvent::Resized(size), &mut state)
+        };
+        DEFERRAL.with(|deferral| deferral.borrow_mut().active = true);
+        let _ = w.sender.send(RenderMsg::Resize(physical_viewport(&w.window, size)));
+        window::with_current(w.handle, || {
+            for input in inputs {
+                host.input(input);
+            }
+            frame_for_new_size(w, &frame_now);
+        });
+        w.presized.set(Some(size));
+        DEFERRAL.with(|deferral| deferral.borrow_mut().active = false);
+    };
+    if let Err(error) = crate::system::backend().window().watch_live_resize(os_window, Box::new(on_resize)) {
+        tracing::debug!("改窗口大小时不能先出帧，改了以后再出：{error}");
     }
 }
 
@@ -1354,6 +1624,26 @@ fn ticker(
             report
         })
     }
+}
+
+/// 多久问一次系统低电量模式开没开
+const LOW_POWER_CHECK: Duration = Duration::from_secs(1);
+
+/// 窗口要的帧率。macOS 的显示链接最高声明 120Hz（ProMotion 屏的上限）；开着低电量模式时系统只把窗口画面显示到
+/// 每秒 60 帧（显示链接照样按 120Hz 回调），所以只要 60，不白画另一半。
+/// Windows 的显示器常见 144、165、240Hz：跟着刷新走，不设上限（上限 120 的话 159Hz 的屏上每隔一次刷新出一帧，
+/// 只有约 80 帧）；最想要的是窗口所在显示器的刷新率，等刷新的时钟用不了、退到计时器时按它出帧
+fn frame_rate(window: &winit::window::Window, low_power: bool) -> FrameRateRange {
+    if !cfg!(target_os = "windows") {
+        return unsynced_frame_rate(cfg!(target_os = "macos") && low_power);
+    }
+    let refresh = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).map_or(60.0, |mhz| mhz as f32 / 1000.0);
+    FrameRateRange::new(refresh.min(60.0), 1000.0, refresh)
+}
+
+/// macOS、Linux 上要的帧率：最高 120，`capped`（macOS 的低电量模式）时最高 60
+fn unsynced_frame_rate(capped: bool) -> FrameRateRange {
+    FrameRateRange::up_to(if capped { 60.0 } else { 120.0 })
 }
 
 /// 帧时钟的后台线程（Windows 等合成器时钟、垂直消隐的线程）等到一帧时叫醒事件循环：

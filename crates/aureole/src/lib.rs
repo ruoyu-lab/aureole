@@ -1,6 +1,7 @@
 //! 自研的 Rust 应用框架：纯 Rust 链式 API + 细粒度信号。
 //!
-//! 现在是测试版，API 还会改。主要支持 macOS；Windows、Linux 是实验性的，还没在真实桌面上验证过。
+//! 现在是测试版，API 还会改。主要支持 macOS；Windows、Linux 是实验性的：Windows 真机上开窗口、画字、自己画标题栏能用，
+//! 别的还没逐项验证；Linux 还没在真实桌面上验证过。
 //!
 //! ```no_run
 //! use aureole::prelude::*;
@@ -74,7 +75,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! aureole = { version = "0.0.1-beta.2", features = ["testing"] }
+//! aureole = { version = "0.0.1-beta.3", features = ["testing"] }
 //! ```
 //!
 //! 这个 crate 是门面：只重新导出，加上特性开关。元素树、布局、文字、输入、动画在 `aureole-core`，应用、窗口、
@@ -131,8 +132,8 @@ pub use aureole_core::{
     // 属性的值、响应式
     IntoProp, Prop, Effect, Memo, Scope, Signal, StoredValue, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, stored_value, untracked,
     // 颜色、滚动、虚拟列表、样式的值、画布
-    Color, WideColor, ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit,
-    IntoListSource, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list,
+    Color, WideColor, ElementHandle, ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit,
+    IntoListSource, ListReader, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list,
     Align, Direction, Justify, Rect, Shadow, Shadows, Canvas, CanvasHits, CanvasTextMetrics, CanvasTextStyle, Drawing, canvas, FrameStats, without_animation,
     // 元素种类：自己定义带内容的元素（见 `kinds` 模块）
     ElementKind,
@@ -158,15 +159,15 @@ pub use controls::{
 };
 
 pub use runtime::{
-    App, Capabilities, CloseRequest, ColorOutput, DisplayColor, FileDialog, FrameClockKind, GpuError, GpuPreference, GroupCacheStats, Notification, OpenRequest, OpenSource,
-    PlatformError, SingleInstance, TitleBar, Window, WindowHandle, WindowMaterial, beep, capabilities, clipboard, current_window, display_color, displays, group_cache_stats, notify,
-    open_path, open_url, quit, is_motion_reduced, reveal_path, set_group_cache_budget, system_accent_color, system_appearance, appearance,
+    App, Capabilities, CloseRequest, ColorOutput, DisplayColor, FileDialog, FrameClockKind, GpuError, GpuPreference, GroupCacheStats, Notification, OpenRequest, OpenSource, accept_drop_format,
+    PageSetup, PlatformError, PrintJob, PrintOutcome, SingleInstance, TitleBar, Window, WindowHandle, WindowMaterial, beep, capabilities, clipboard, current_window, display_color, displays, group_cache_stats, notify,
+    open_path, open_url, quit, is_low_power_mode, is_motion_reduced, reveal_path, set_group_cache_budget, system_accent_color, system_appearance, appearance,
 };
 // 菜单栏和托盘
 #[cfg(feature = "menus")]
 pub use runtime::{Menu, MenuItem, Submenu, Tray};
 // 插件：钩子、平台事件、每帧的信息
-pub use runtime::{FrameInfo, PlatformEvent, PlatformEventKind, Plugin};
+pub use runtime::{FrameInfo, PlatformEvent, PlatformEventKind, Plugin, at_exit};
 
 #[cfg(feature = "devtools")]
 pub mod devtools {

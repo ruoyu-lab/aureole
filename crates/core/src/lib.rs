@@ -122,8 +122,8 @@ pub use input::{
 pub use property::{IntoProp, Prop};
 pub use reactive::{Effect, Memo, Scope, Signal, StoredValue, batch, detached, effect, flush_effects, live_node_count, memo, on_cleanup, signal, stored_value, untracked};
 pub use scene::{Angle, Color, WideColor, deg, ms, rad, secs, turns};
-pub use scroll::{ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit};
-pub use virtual_list::{IntoListSource, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list};
+pub use scroll::{ElementHandle, ScrollHandle, scroll, scroll_x, scroll_y, scroll_y_fit};
+pub use virtual_list::{IntoListSource, ListReader, ListSource, Measured, IntoRowHeights, RowHeights, measured, virtual_list};
 pub use geometry::Rect;
 pub use layout::{Align, Direction, Justify};
 pub use shadow::{Shadow, Shadows};
@@ -173,7 +173,7 @@ pub mod prelude {
         IntoProp, Justify, LineCap, LineJoin, Memo, VectorPath, Property, Rect, Shadow, Shader, Signal, Spring, StoredValue, Stroke, WideColor,
         Tween, View, batch, column, flow, image, memo, path, rect, rich_text, row, signal, span, stored_value, text, text_area, text_field,
         Canvas, CanvasHits, CanvasTextMetrics, CanvasTextStyle, canvas, Shadows,
-        untracked, InlineAlign, Span, SubmitKey, TextAlign, ScrollHandle, measured, scroll, scroll_x, scroll_y, scroll_y_fit, virtual_list,
+        untracked, InlineAlign, Span, SubmitKey, TextAlign, ElementHandle, ScrollHandle, measured, scroll, scroll_x, scroll_y, scroll_y_fit, virtual_list,
     };
     // 滤镜、混合模式、遮罩
     pub use crate::{BlendMode, Filter, FilterChain, Mask};

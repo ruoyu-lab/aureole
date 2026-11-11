@@ -152,6 +152,41 @@ impl<T: 'static> Reader<T> {
     }
 }
 
+impl<T: Clone + 'static> ListSource<T> {
+    /// 列表外面也要读这份数据时（控件按下标选中、键盘走到第几行）：换成一个读取器，它可以复制，
+    /// 也能再交给 [`virtual_list`]。闭包的数据源在这里开始跟踪依赖，要在响应式作用域里调用
+    pub fn reader(self) -> ListReader<T> {
+        ListReader(Reader::new(self.0))
+    }
+}
+
+/// 虚拟列表数据的读取器，见 [`ListSource::reader`]
+pub struct ListReader<T: 'static>(Reader<T>);
+
+impl<T: 'static> Clone for ListReader<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: 'static> Copy for ListReader<T> {}
+
+impl<T: 'static> ListReader<T> {
+    /// 按引用读现在的数据（响应式），不复制列表
+    pub fn with<R>(&self, f: impl FnOnce(&[T]) -> R) -> R {
+        self.0.with(f)
+    }
+}
+
+impl<T: 'static> IntoListSource<T> for ListReader<T> {
+    fn into_list_source(self) -> ListSource<T> {
+        ListSource(match self.0 {
+            Reader::Signal(signal) => Source::Signal(signal),
+            Reader::Memo(memo, read) => Source::Memo(memo, read),
+        })
+    }
+}
+
 /// 行高：固定值，按项给出（`Fn(&T) -> f32`），或者由内容决定（[`measured()`]）
 pub trait IntoRowHeights<T> {
     /// 转成行高的来源

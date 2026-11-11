@@ -1,7 +1,7 @@
 //! 标题栏和窗口材质：应用自己画标题栏（内容铺满整个窗口）、窗口背后透出系统的材质。
 //!
 //! 这里是不碰系统的那一半：选项和度量的类型、各平台材质的对应关系、双击标题栏的系统设置怎么解释、
-//! 窗口边缘和最大化按钮的命中规则，在任何平台上都能单元测试。碰系统的在 `title_bar/macos.rs`、`title_bar/windows.rs`，
+//! 窗口边缘和最大化按钮的命中规则、Windows 上隐藏了标题栏的窗口的内容区怎么算，在任何平台上都能单元测试。碰系统的在 `title_bar/macos.rs`、`title_bar/windows.rs`，
 //! 由 [`crate::NativeBackend`] 的 [`crate::WindowService`] 调用。Linux 上的窗口去装饰、拖动、改大小都是窗口库的，
 //! 平台层只给度量。
 
@@ -150,7 +150,7 @@ pub enum ResizeEdge {
     BottomRight,
 }
 
-/// 指针按在内容铺满整个窗口的窗口的哪一条边上：系统不再替这样的窗口留边框，边缘 `border` 以内算调整大小。
+/// 指针按在内容铺满整个窗口的窗口的哪一条边上（Linux）：系统不再替这样的窗口留边框，边缘 `border` 以内算调整大小。
 /// 角的范围是两倍的 `border`，比边好抓。`point`、`size`、`border` 同一种单位
 pub fn resize_edge(point: [f32; 2], size: [f32; 2], border: f32) -> Option<ResizeEdge> {
     let ([x, y], [w, h]) = (point, size);
@@ -174,7 +174,7 @@ pub fn resize_edge(point: [f32; 2], size: [f32; 2], border: f32) -> Option<Resiz
     }
 }
 
-/// 指针在内容铺满整个窗口的窗口上算哪一块（Windows 的 `WM_NCHITTEST` 按它回答）
+/// 指针在隐藏了标题栏的窗口的内容区里算哪一块（Windows 的 `WM_NCHITTEST` 在内容区里按它回答）
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowHit {
     /// 内容
@@ -185,10 +185,25 @@ pub enum WindowHit {
     MaximizeButton,
 }
 
-/// [`WindowHit`] 的规则：`resizable` 而且没有最大化、全屏时（`framed`）边缘算调整大小；最大化按钮的区域优先于内容，
-/// 但让位给窗口边缘（按钮一般贴着上边，最上面几个像素还要能拖着改大小）。都是物理像素。
-pub fn hit_test(point: [f32; 2], size: [f32; 2], border: f32, framed: bool, maximize_button: Option<[f32; 4]>) -> WindowHit {
-    if framed && let Some(edge) = resize_edge(point, size, border) {
+/// 内容铺到窗口上边的窗口（Windows 隐藏了标题栏）：指针在内容区上边 `border` 以内是改大小，离左右两边两倍的 `border`
+/// 以内是角。左、右、下用不着：那三边是系统的边框，在内容区外面，系统自己回答。`point`、`width`、`border` 同一种单位
+pub fn top_edge(point: [f32; 2], width: f32, border: f32) -> Option<ResizeEdge> {
+    let [x, y] = point;
+    if x < 0.0 || y < 0.0 || x >= width || y >= border {
+        return None;
+    }
+    Some(match () {
+        () if x < border * 2.0 => ResizeEdge::TopLeft,
+        () if x >= width - border * 2.0 => ResizeEdge::TopRight,
+        () => ResizeEdge::Top,
+    })
+}
+
+/// [`WindowHit`] 的规则（Windows 的内容区里，`point` 相对内容区的左上角）：能改大小而且没有最大化、全屏时（`framed`），
+/// 上边一条算调整大小（[`top_edge`]，和系统的标题栏一样，最上面几个像素拖着改大小）；最大化按钮的区域优先于内容，
+/// 但让位给这一条。都是物理像素。
+pub fn hit_test(point: [f32; 2], width: f32, border: f32, framed: bool, maximize_button: Option<[f32; 4]>) -> WindowHit {
+    if framed && let Some(edge) = top_edge(point, width, border) {
         return WindowHit::Edge(edge);
     }
     if let Some([x, y, w, h]) = maximize_button
@@ -200,4 +215,35 @@ pub fn hit_test(point: [f32; 2], size: [f32; 2], border: f32, framed: bool, maxi
         return WindowHit::MaximizeButton;
     }
     WindowHit::Client
+}
+
+/// 窗口矩形、内容区、边框的左、上、右、下（Windows 的屏幕坐标，物理像素；边框是四边各多宽）
+pub type Edges = [i32; 4];
+
+/// 自动隐藏的任务栏贴着的那条边，最大化的窗口的内容区让出这么宽（物理像素）。内容区盖满整个显示器时系统把窗口当成全屏的，
+/// 指针碰到屏幕边任务栏也不弹出来
+pub const AUTOHIDE_TASKBAR_GAP: i32 = 2;
+
+/// Windows：隐藏了标题栏、没有最大化的窗口的内容区（`WM_NCCALCSIZE`）。`frame` 是系统给这种样式的窗口的边框
+/// （`AdjustWindowRectExForDpi`，上边含标题栏）。左、右、下留着系统的边框：Windows 10 起它看不见，是窗口外面那一圈拖着改大小的地方，
+/// 阴影也跟着它，和别的窗口一样；上边不留，内容铺到窗口的上边（标题栏是应用画的，上边改大小的那一条在内容里，见 [`top_edge`]）
+pub fn framed_client(window: Edges, frame: Edges) -> Edges {
+    let [left, top, right, bottom] = window;
+    [left + frame[0], top, right - frame[2], bottom - frame[3]]
+}
+
+/// Windows：隐藏了标题栏的最大化的窗口的内容区。最大化的窗口四边都比显示器的工作区大一圈边框（系统这样把改大小的边框藏到屏幕外面），
+/// 四边各收进一圈边框（上边也只收边框，不含标题栏）、再限在工作区（`work`）里，正好是工作区。
+/// `autohide` 是自动隐藏的任务栏在这个显示器的哪几条边上（左、上、右、下），那几条边让出 [`AUTOHIDE_TASKBAR_GAP`]
+pub fn maximized_client(window: Edges, frame: Edges, work: Option<Edges>, autohide: [bool; 4]) -> Edges {
+    let [left, top, right, bottom] = window;
+    let inset = [left + frame[0], top + frame[3], right - frame[2], bottom - frame[3]];
+    let clamped = work.map(|[l, t, r, b]| [inset[0].max(l), inset[1].max(t), inset[2].min(r), inset[3].min(b)]);
+    let mut client = clamped.filter(|[l, t, r, b]| l < r && t < b).unwrap_or(inset);
+    let gap = |on: bool| if on { AUTOHIDE_TASKBAR_GAP } else { 0 };
+    client[0] += gap(autohide[0]);
+    client[1] += gap(autohide[1]);
+    client[2] -= gap(autohide[2]);
+    client[3] -= gap(autohide[3]);
+    client
 }

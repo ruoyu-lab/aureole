@@ -12,10 +12,8 @@ use crate::handlers::{EventType, Handler};
 use crate::input::{Buttons, Modifiers, MouseButton, PointerId, PointerKind};
 use crate::interaction::FocusHandle;
 
-/// 双击判定：两次按下的间隔和距离
-const DOUBLE_CLICK_SECONDS: f64 = 0.4;
-const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
-/// 手指的两次点按算连击的距离：手指落不到同一个像素上
+/// 手指的两次点按算连击的距离：手指落不到同一个像素上。鼠标的间隔和距离、手指的间隔按平台惯例
+/// （[`crate::Conventions::double_click_interval`]、[`crate::Conventions::double_click_distance`]，Windows 跟着系统设置）
 const DOUBLE_TAP_DISTANCE: f32 = 24.0;
 
 /// 哪些节点要从路由状态里去掉
@@ -49,7 +47,8 @@ pub(super) struct Press {
 
 /// 两次按下算不算连击
 fn repeated(last: Option<(f64, [f32; 2])>, now: f64, point: [f32; 2], within: f32) -> bool {
-    last.is_some_and(|(time, at)| now - time < DOUBLE_CLICK_SECONDS && (at[0] - point[0]).hypot(at[1] - point[1]) < within)
+    let interval = crate::system::conventions().double_click_interval.as_secs_f64();
+    last.is_some_and(|(time, at)| now - time < interval && (at[0] - point[0]).hypot(at[1] - point[1]) < within)
 }
 
 /// 别的应用拖来的内容这一次问到哪了
@@ -272,7 +271,7 @@ impl Router {
 
     /// 左键按下：数连击，记下这一次。`now` 是定时器的时钟：显示链接停着、元素树的帧时间不走的时候也照样走
     pub(super) fn count_click(&mut self, now: f64, point: [f32; 2]) -> u32 {
-        self.count(now, point, DOUBLE_CLICK_DISTANCE)
+        self.count(now, point, crate::system::conventions().double_click_distance)
     }
 
     /// 主手指放上：和 [`Self::count_click`] 同一套，距离放宽一些

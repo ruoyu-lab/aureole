@@ -19,11 +19,11 @@ png.workspace = true
 image.workspace = true
 serde_json.workspace = true
 # 安装包的格式；不要界面，打包工具不用带上框架
-aureole-installer = { path = "../installer", version = "0.0.1-beta.2", default-features = false }
+aureole-installer = { path = "../installer", version = "0.0.1-beta.3", default-features = false }
 
 # 把图标嵌进 Windows 的可执行文件
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader"] }
 
 # 可执行文件不叫 bundle：打包的输出目录是 target/<profile>/bundle/，同名时 cargo build 会因为删不掉这个目录而失败。
 # 叫 cargo-bundle 也能用 cargo install --path crates/bundle 装成真正的 cargo 子命令

@@ -228,6 +228,13 @@ fn to_line(event: &InputEvent) -> String {
             if !data.files.is_empty() {
                 put("paths", data.files.iter().map(|p| json!(p.to_string_lossy())).collect());
             }
+            // 带格式的文字只记文字（样式回放时没有）；自己定的格式只记名字和长度（回放时是同样长的 0）
+            if !data.rich_text.is_empty() {
+                put("rich_text", json!(data.rich_text.iter().map(|span| span.text.as_str()).collect::<String>()));
+            }
+            if !data.custom.is_empty() {
+                put("custom", data.custom.iter().map(|(name, bytes)| json!([name, bytes.len()])).collect());
+            }
             "external_drop"
         }
         InputKind::Resize { size, scale_factor } => {
@@ -405,8 +412,14 @@ fn from_json(v: &Value) -> Result<InputEvent, String> {
     Ok(InputEvent { time: std::time::Duration::from_secs_f64(time.max(0.0)), kind })
 }
 
-const KIND_NAMES: [(ExternalDataKinds, &str); 4] =
-    [(ExternalDataKinds::TEXT, "text"), (ExternalDataKinds::LINK, "link"), (ExternalDataKinds::IMAGE, "image"), (ExternalDataKinds::FILES, "files")];
+const KIND_NAMES: [(ExternalDataKinds, &str); 6] = [
+    (ExternalDataKinds::TEXT, "text"),
+    (ExternalDataKinds::LINK, "link"),
+    (ExternalDataKinds::IMAGE, "image"),
+    (ExternalDataKinds::FILES, "files"),
+    (ExternalDataKinds::RICH_TEXT, "rich_text"),
+    (ExternalDataKinds::CUSTOM, "custom"),
+];
 
 fn kind_names(kinds: ExternalDataKinds) -> Value {
     KIND_NAMES.iter().filter(|(kind, _)| kinds.contains(*kind)).map(|(_, name)| json!(name)).collect()
@@ -436,7 +449,19 @@ fn parse_drop_data(v: &Value) -> Result<ExternalDropData, String> {
         Some(paths) => paths.iter().map(|p| p.as_str().map(PathBuf::from).ok_or("文件名不是字符串")).collect::<Result<_, _>>()?,
         None => Vec::new(),
     };
-    Ok(ExternalDropData { text: v["text"].as_str().map(str::to_owned), link: v["link"].as_str().map(str::to_owned), image, files })
+    let rich_text = v["rich_text"].as_str().map(|text| vec![crate::rich_text::SpanInfo { text: text.to_owned(), ..Default::default() }]).unwrap_or_default();
+    let custom = match v["custom"].as_array() {
+        Some(entries) => entries
+            .iter()
+            .map(|entry| {
+                let name = entry[0].as_str().ok_or("自己定的格式没有名字")?;
+                let len = entry[1].as_u64().filter(|n| *n <= 1 << 30).ok_or("自己定的格式的长度不对")?;
+                Ok((name.to_owned(), vec![0; len as usize]))
+            })
+            .collect::<Result<_, String>>()?,
+        None => Vec::new(),
+    };
+    Ok(ExternalDropData { text: v["text"].as_str().map(str::to_owned), link: v["link"].as_str().map(str::to_owned), image, files, rich_text, custom })
 }
 
 fn number(v: &Value) -> Result<f32, String> {

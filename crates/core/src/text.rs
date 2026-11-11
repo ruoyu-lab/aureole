@@ -11,6 +11,7 @@ use std::mem;
 use std::ops::Range;
 use std::rc::Rc;
 
+use parley::fontique::{Collection, FallbackKey, Script};
 use parley::setting::Tag;
 use parley::{
     Affinity, Alignment, AlignmentOptions, BoundingBox, Brush, Cluster, Cursor, FontContext, FontData, FontFamily, FontFamilyName, FontFeature,
@@ -120,6 +121,37 @@ impl TextStyle {
     }
 }
 
+/// `font_family` 的值里的字体族名：一个，或者逗号隔开的几个（前面的优先）。名字两边可以有空格、引号
+fn family_names(names: &str) -> impl Iterator<Item = &str> {
+    names.split(',').map(|name| name.trim().trim_matches(['"', '\''])).filter(|name| !name.is_empty())
+}
+
+/// 指定的字体族，后面接上系统界面字体
+fn family_list(names: &str) -> FontFamily<'static> {
+    let mut list: Vec<FontFamilyName<'static>> = family_names(names).map(|name| FontFamilyName::Named(Cow::Owned(name.to_owned()))).collect();
+    list.push(FontFamilyName::Generic(GenericFamily::SystemUi));
+    FontFamily::List(Cow::Owned(list))
+}
+
+/// 符号的回退字体，排在系统给的回退字体后面（系统里有哪个用哪个）。
+/// 系统的回退按文字种类找，问的是这种文字的样例，几何图形、箭头、技术符号、装饰符号这些问不到，所以自己列
+#[cfg(target_os = "macos")]
+const SYMBOL_FAMILIES: &[&str] = &["Menlo", "Apple Symbols", "STIX Two Math", "Hiragino Sans", "Zapf Dingbats", "Apple Braille"];
+#[cfg(target_os = "windows")]
+const SYMBOL_FAMILIES: &[&str] = &["Consolas", "Segoe UI Symbol", "Cambria Math", "MS Gothic"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const SYMBOL_FAMILIES: &[&str] = &["DejaVu Sans Mono", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols2", "Noto Sans Symbols 2", "Noto Sans Math", "FreeSerif", "Symbola"];
+
+/// 把符号的回退字体接到汉字这一项后面：parley 每段文字都会查这一项（不管这段是什么文字），
+/// 排在指定的字体、这段文字自己的回退、系统给汉字的回退后面，所以只有原来缺字的字才会用到它们
+fn add_symbol_fallbacks(collection: &mut Collection) {
+    let han = FallbackKey::new(Script::from_bytes(*b"Hani"), None);
+    // 先向系统要：这一项有了内容就不再问系统，直接追加会把系统给的盖掉
+    let _ = collection.fallback_families(han).count();
+    let symbols: Vec<_> = SYMBOL_FAMILIES.iter().filter_map(|name| collection.family_id(name)).collect();
+    collection.append_fallbacks(han, symbols.into_iter());
+}
+
 /// 把样式交给排版：指定的字体族后面接上系统界面字体，指定的字体里没有的字（比如中文）从系统字体回退。
 /// 自己加载的可变字体按字号取光学尺寸（`opsz` 轴）：不取时用的是字体的默认字形，常常是给大标题的那一档，
 /// 笔画细到正文字号下连字符、横画几乎看不见
@@ -129,7 +161,7 @@ pub(crate) fn push_style(builder: &mut RangedBuilder<'_, SpanId>, style: &TextSt
         Some(name) => {
             let optical = FontVariation::new(Tag::new(b"opsz"), style.size);
             builder.push_default(StyleProperty::FontVariations(FontVariations::List(Cow::Owned(vec![optical]))));
-            FontFamily::List(Cow::Owned(vec![FontFamilyName::Named(Cow::Owned(name.to_string())), system]))
+            family_list(&name)
         }
         None => FontFamily::Single(system),
     };
@@ -260,9 +292,7 @@ fn push_spans(builder: &mut RangedBuilder<'_, SpanId>, style: &TextStyle, rich: 
             builder.push(StyleProperty::FontVariations(FontVariations::List(Cow::Owned(vec![optical]))), range.clone());
         }
         if let Some(name) = s.family.and_then(font::family_name) {
-            let system = FontFamilyName::Generic(GenericFamily::SystemUi);
-            let list = vec![FontFamilyName::Named(Cow::Owned(name.to_string())), system];
-            builder.push(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(list))), range.clone());
+            builder.push(StyleProperty::FontFamily(family_list(&name)), range.clone());
         } else if s.code {
             builder.push(StyleProperty::FontFamily(FontFamily::List(Cow::Borrowed(&MONOSPACE))), range.clone());
         }
@@ -1383,6 +1413,7 @@ impl TextSystem {
             forgotten: 0,
             generated: 0,
         };
+        add_symbol_fallbacks(&mut system.fonts.collection);
         system.sync_fonts();
         system
     }

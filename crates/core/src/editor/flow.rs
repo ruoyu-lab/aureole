@@ -672,6 +672,20 @@ impl Flow {
             let next = from.next_visual(piece.layout);
             return (piece.base + next.index(), next.affinity());
         }
+        // 平台惯例是到下一个词的开头时（Windows）跳过词后面的空白，同 `motion::right`
+        let skips = crate::system::conventions().word_forward_skips_spaces;
+        if skips && let Some(start) = super::motion::after_spaces(content, at) {
+            return self.snapped(start, Affinity::Downstream);
+        }
+        let end = self.word_end(content, from, at);
+        match super::motion::after_spaces(content, end.0).filter(|_| skips) {
+            Some(start) => self.snapped(start, Affinity::Downstream),
+            None => end,
+        }
+    }
+
+    /// 往右到词尾，见 [`Self::right`]
+    fn word_end(&self, content: &str, from: Cursor, at: usize) -> (usize, Affinity) {
         if let Some(end) = segmentation::next_word_end(content, at) {
             return self.snapped(end, Affinity::Upstream);
         }

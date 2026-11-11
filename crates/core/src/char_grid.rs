@@ -14,6 +14,7 @@
 //! - **按行缓存图元**：每行改一次换一个新的版本号，元素按版本号缓存这一行的背景、字形、下划线、删除线图元（行内坐标）；
 //!   改一行只重新生成这一行，滚动（[`CharGrid::scroll_up`]）只是挪行，行的缓存跟着走
 //! - 格子对齐物理像素（格宽、格高、基线都取整到物理像素），字形不用亚像素位置，背景色块之间没有缝
+//! - **制表符和方块自己画**（U+2500 ~ U+259F，见 `drawn`）：铺满格子、连得上，和用哪个字体、行高多少无关
 //!
 //! ```
 //! # use aureole::prelude::*;
@@ -40,8 +41,10 @@ use crate::segmentation::graphemes;
 use crate::text::{CellGlyph, CellMetrics, CellShape, GlyphHasher, Ink, TextStyle, TextSystem};
 
 mod cluster;
+mod drawn;
 
 use cluster::{clamped, cluster_width, first_cluster_len, simple_width, simple_width_of_code};
+use drawn::is_drawn;
 
 /// 一格的样式：前景色、背景色（`None` 是元素的文字颜色、透明）、粗体、斜体、下划线、删除线、反色
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1199,11 +1202,8 @@ impl CharGridBlock {
                 }
                 let mut chars = cluster.chars();
                 match (chars.next(), chars.next()) {
-                    (Some(ch), None) => {
-                        if !drawn(ch, col as f32 * m.width, &m, scale, ink.color, &mut glyphs) {
-                            self.push_glyph(text, ch, 0, col, width, &m, ink.color, &mut glyphs);
-                        }
-                    }
+                    (Some(ch), None) if is_drawn(ch) => drawn::draw(text, ch, col as f32 * m.width, &m, ink.color, &mut glyphs),
+                    (Some(ch), None) => self.push_glyph(text, ch, 0, col, width, &m, ink.color, &mut glyphs),
                     _ => self.push_cluster(text, cluster, 0, col, width, &m, ink.color, &mut glyphs),
                 }
                 col += width;
@@ -1246,7 +1246,7 @@ impl CharGridBlock {
         }
     }
 
-    /// 生成一行的图元：同样底色的相邻格子合成一块，每个字一个字形图元（方块、制表线自己画），簇和连字整形，
+    /// 生成一行的图元：同样底色的相邻格子合成一块，每个字一个字形图元（方块、制表符自己画），簇和连字整形，
     /// 下划线、删除线一段一段地画
     fn build_row(&mut self, text: &mut TextSystem, source: &Row, m: &CellMetrics) -> RowQuads {
         let cells = &source.cells[..];
@@ -1308,7 +1308,7 @@ impl CharGridBlock {
         row
     }
 
-    /// 一格的字形图元：方块、制表线自己画，一个字查字形，簇整形
+    /// 一格的字形图元：方块、制表符自己画，一个字查字形，簇整形
     #[inline]
     fn push_cell(&mut self, text: &mut TextSystem, row: &Row, col: usize, m: &CellMetrics, color: Color, out: &mut Vec<Quad>) {
         let cell = &row.cells[col];
@@ -1318,23 +1318,29 @@ impl CharGridBlock {
         let flags = cell.style.bold as u8 | (cell.style.italic as u8) << 1;
         if let Some(index) = cell.slot.cluster() {
             self.push_cluster(text, &row.clusters[index], flags, col, row.span_at(col), m, color, out);
-        } else if let Some(ch) = cell.slot.char()
-            && !drawn(ch, col as f32 * m.width, m, text.scale(), color, out)
-        {
-            self.push_glyph(text, ch, flags, col, row.span_at(col), m, color, out);
+        } else if let Some(ch) = cell.slot.char() {
+            if is_drawn(ch) {
+                drawn::draw(text, ch, col as f32 * m.width, m, color, out);
+            } else {
+                self.push_glyph(text, ch, flags, col, row.span_at(col), m, color, out);
+            }
         }
     }
 
-    /// 一个字的字形图元（行内坐标）：主字体里的字从格子左边开始，回退来的字（宽度和格子不一样）放在占的格子正中
+    /// 一个字的字形图元（行内坐标）：主字体里的字从格子左边开始，回退来的字（宽度和格子不一样）放在占的格子正中，
+    /// 比占的格子宽出很多时缩小到放得下，字的中间还在原来的高度上
     fn push_glyph(&mut self, text: &mut TextSystem, ch: char, flags: u8, col: usize, span: usize, m: &CellMetrics, color: Color, out: &mut Vec<Quad>) {
         let style = &self.style;
         let glyph = self.glyphs.entry(ch as u32 | (flags as u32) << 24).or_insert_with(|| text.cell_glyph(ch, &styled(style, flags)));
         let Some(glyph) = glyph else { return };
         let scale = text.scale();
         let room = span as f32 * m.width;
-        let left = if (glyph.advance - m.width).abs() < 0.5 / scale { 0.0 } else { ((room - glyph.advance) * 0.5 * scale).round() / scale };
+        let fit = if glyph.advance > room * OVERFLOW { room / glyph.advance } else { 1.0 };
+        let advance = glyph.advance * fit;
+        let left = if (advance - m.width).abs() < 0.5 / scale { 0.0 } else { ((room - advance) * 0.5 * scale).round() / scale };
         let x = (col as f32 * m.width + left) * scale;
-        if let Some(quad) = text.cell_quad(&glyph.face, glyph.glyph, self.style.size * scale, [x.round(), (m.baseline * scale).round()], color) {
+        let baseline = m.baseline - (1.0 - fit) * self.style.size * MIDDLE_OF_TEXT;
+        if let Some(quad) = text.cell_quad(&glyph.face, glyph.glyph, self.style.size * scale * fit, [x.round(), (baseline * scale).round()], color) {
             out.push(quad);
         }
     }
@@ -1432,6 +1438,8 @@ impl CharGridBlock {
 
 /// 一组字形比占的格子宽这么多倍时缩小：一点点的出入（彩色表情比两格略宽）不值得换一个字号
 const OVERFLOW: f32 = 1.25;
+/// 字的中间在基线上面多少倍字号（和删除线一样）：缩小的字绕着这里缩小
+const MIDDLE_OF_TEXT: f32 = 0.35;
 
 /// 一格的下划线、删除线
 #[inline]
@@ -1467,11 +1475,6 @@ fn shaped_run_end(cells: &[StoredCell], start: usize) -> usize {
     start + 1 + run
 }
 
-/// 自己画的字（[`drawn`] 里的那些）
-fn is_drawn(ch: char) -> bool {
-    matches!(ch as u32, 0x2580..=0x2595) || matches!(ch, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼')
-}
-
 /// 图元落在 `left..right` 里的部分（行内坐标）：只有横向切开，字形的图集坐标按比例跟着切。完全在外面时是 `None`
 fn clipped_x(quad: &Quad, left: f32, right: f32) -> Option<Quad> {
     let [x, _, width, _] = quad.rect;
@@ -1488,58 +1491,6 @@ fn clipped_x(quad: &Quad, left: f32, right: f32) -> Option<Quad> {
         inside.uv[2] = u0 + (u1 - u0) * (to - x) / width;
     }
     Some(inside)
-}
-
-/// 方块（U+2580 ~ U+2595）和细的制表线（─ │ ┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼）自己画成矩形：字体里的这些字不一定铺满格子，
-/// 连起来会有缝。画了返回 true。`x` 是格子左边（行内坐标），矩形对齐物理像素
-fn drawn(ch: char, x: f32, m: &CellMetrics, scale: f32, color: Color, out: &mut Vec<Quad>) -> bool {
-    let snap = |v: f32| (v * scale).round() / scale;
-    let (w, h) = (m.width, m.height);
-    let mut rect = |x0: f32, y0: f32, x1: f32, y1: f32, opacity: f32| {
-        let (x0, y0, x1, y1) = (snap(x + x0), snap(y0), snap(x + x1), snap(y1));
-        if x1 > x0 && y1 > y0 {
-            out.push(Quad::new(x0, y0, x1 - x0, y1 - y0).fill(color).opacity(opacity));
-        }
-    };
-    let code = ch as u32;
-    match code {
-        // ▀ 上半，▁ ~ ▇ 下面 1/8 ~ 7/8，█ 整格，▉ ~ ▏ 左边 7/8 ~ 1/8，▐ 右半
-        0x2580 => rect(0.0, 0.0, w, h * 0.5, 1.0),
-        0x2581..=0x2588 => rect(0.0, h * (1.0 - (code - 0x2580) as f32 / 8.0), w, h, 1.0),
-        0x2589..=0x258f => rect(0.0, 0.0, w * (0x2590 - code) as f32 / 8.0, h, 1.0),
-        0x2590 => rect(w * 0.5, 0.0, w, h, 1.0),
-        // ░ ▒ ▓：整格，按浓淡减淡
-        0x2591..=0x2593 => rect(0.0, 0.0, w, h, (code - 0x2590) as f32 * 0.25),
-        // ▔ 上面 1/8，▕ 右边 1/8
-        0x2594 => rect(0.0, 0.0, w, h / 8.0, 1.0),
-        0x2595 => rect(w * 7.0 / 8.0, 0.0, w, h, 1.0),
-        _ => {
-            // 细线：从格子正中往左、右、上、下伸出去的几段
-            let (left, right, up, down) = match ch {
-                '─' => (true, true, false, false),
-                '│' => (false, false, true, true),
-                '┌' => (false, true, false, true),
-                '┐' => (true, false, false, true),
-                '└' => (false, true, true, false),
-                '┘' => (true, false, true, false),
-                '├' => (false, true, true, true),
-                '┤' => (true, false, true, true),
-                '┬' => (true, true, false, true),
-                '┴' => (true, true, true, false),
-                '┼' => (true, true, true, true),
-                _ => return false,
-            };
-            let t = snap(1.0).max(1.0 / scale);
-            let (cx, cy) = (snap(w * 0.5 - t * 0.5), snap(h * 0.5 - t * 0.5));
-            if left || right {
-                rect(if left { 0.0 } else { cx }, cy, if right { w } else { cx + t }, cy + t, 1.0);
-            }
-            if up || down {
-                rect(cx, if up { 0.0 } else { cy }, cx + t, if down { h } else { cy + t }, 1.0);
-            }
-        }
-    }
-    true
 }
 
 /// 预编辑文字占几列（按字素簇算）

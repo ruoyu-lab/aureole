@@ -42,6 +42,7 @@ mod cache;
 mod context;
 mod disk_cache;
 mod encoder;
+mod external;
 mod image;
 mod memory;
 mod offscreen;
@@ -64,8 +65,11 @@ pub use scene::{
 };
 
 pub use cache::DEFAULT_CACHE_BUDGET;
-pub use context::{Gpu, GpuError, GpuInfo, GpuKind, GpuPreference, active_adapter, instance, instance_with_display};
+pub use context::{
+    DisplayGpu, Gpu, GpuError, GpuInfo, GpuKind, GpuPreference, active_adapter, instance, instance_with_all_backends, instance_with_display, only_native_backend,
+};
 pub use disk_cache::set_pipeline_cache_dir;
+pub use external::{ExternalTexture, external_revision};
 pub use image::{IMAGE_FLOAT_FORMAT, IMAGE_FORMAT};
 pub use memory::{GpuMemory, gpu_memory};
 pub use offscreen::{Offscreen, render_to_extended_image, render_to_image};

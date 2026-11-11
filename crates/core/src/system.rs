@@ -73,13 +73,39 @@ pub struct Conventions {
     pub uses_arrows_for_line_edges: bool,
     /// 主修饰键加 Y 也是重做（Windows）；主修饰键加 Shift 加 Z 在所有平台都是
     pub accepts_y_for_redo: bool,
-    /// 滚轮按行报告时一行滚多远（逻辑像素）。macOS 的滚轮事件自带加速（转得快时一格有好几行），一行短一些；
-    /// 其他平台一格就是一行，按常见的三行文字算
+    /// 一"行"滚多远（逻辑像素）：方向键滚动一下的距离，翻页时留下重叠的那一行，按系统默认设置时滚轮一格也是这么多。
+    /// macOS 的滚轮事件自带加速（转得快时一格有好几行），一行短一些；其他平台一格就是一行，按常见的三行文字算
     pub wheel_line_height: f32,
+    /// 滚轮滚一格滚多远（逻辑像素），竖着、横着。Windows 跟着系统设置（"一次滚动的行数"按 [`Self::wheel_line_height`]
+    /// 的三分之一一行算，横着是"一次滚动的字符数"），其他平台和 [`Self::wheel_line_height`] 一样
+    pub wheel_notch: [f32; 2],
+    /// 滚轮一格滚一屏（Windows 的"一次滚动一个屏幕"）：和翻页键一样留一行重叠，不看 [`Self::wheel_notch`]
+    pub wheel_scrolls_pages: bool,
+    /// 滚轮报来的不足一格的行数是精确的位移（Windows 的精确式触控板、高分辨率滚轮，Linux X11 的触控板）：
+    /// 直接跟着走，不像整格那样平滑过去（平滑过去的话手指停了内容还在追）。macOS 的鼠标滚轮带加速，一格也会报成小数，不算
+    pub fractional_wheel_is_precise: bool,
+    /// 按住 Shift 转滚轮是横着滚（Windows、Linux；macOS 的系统自己把鼠标滚轮换成横向的位移）
+    pub shift_wheel_scrolls_horizontally: bool,
+    /// 按住 Control 转滚轮是缩放，视口不滚，交给捏合（Windows：精确式触控板的双指捏合也是按 Control 转滚轮报来的）
+    pub control_wheel_zooms: bool,
     /// 按住 Control 点左键算右键点击（macOS，有元素接右键时）
     pub treats_control_click_as_secondary: bool,
     /// 手指按住不动多久算长按（弹右键菜单、选词）。Windows 的按住比别的系统慢（系统设置里是档位，没有公开的毫秒数，这里是默认档大约的时长）
     pub long_press_duration: Duration,
+    /// 两次按下最多隔多久算连击（双击、三击）。Windows 跟着系统设置的双击速度
+    pub double_click_interval: Duration,
+    /// 两次按下最远隔多远算连击（逻辑像素，两点的距离）。Windows 跟着系统的双击范围（以第一次按下为中心的矩形，取它的外接圆）
+    pub double_click_distance: f32,
+    /// 按下以后移动多远才算拖动（逻辑像素）。Windows 跟着系统的拖动阈值
+    pub drag_threshold: f32,
+    /// 按词往后走、按词往后删到下一个词的开头（跳过词后面的空白，Windows 的 Ctrl+→、Ctrl+Delete）；
+    /// 为假时到这个词的末尾（macOS 的 Option+→，Linux 的 Ctrl+→）
+    pub word_forward_skips_spaces: bool,
+    /// Shift+Insert 粘贴、Ctrl+Insert 复制、Shift+Delete 剪切（Windows、Linux 的老习惯）
+    pub accepts_insert_for_clipboard: bool,
+    /// 输入法候选框要避开的区域左右各多留两三个字（macOS、Linux 的输入法把它当成要避开的范围）。
+    /// Windows 的输入法把区域的左上角当成候选框的位置，多留的话候选框离组的字偏左，不留
+    pub pads_ime_area: bool,
 }
 
 impl Conventions {
@@ -90,19 +116,42 @@ impl Conventions {
         uses_arrows_for_line_edges: true,
         accepts_y_for_redo: false,
         wheel_line_height: 40.0,
+        wheel_notch: [40.0, 40.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: false,
+        shift_wheel_scrolls_horizontally: false,
+        control_wheel_zooms: false,
         treats_control_click_as_secondary: true,
         long_press_duration: Duration::from_millis(500),
+        double_click_interval: Duration::from_millis(400),
+        double_click_distance: 4.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: false,
+        accepts_insert_for_clipboard: false,
+        pads_ime_area: true,
     };
 
-    /// Windows 的惯例
+    /// Windows 的惯例（系统的默认设置；运行时按此刻的系统设置换掉滚轮、双击、拖动的那几项）
     pub const WINDOWS: Self = Self {
         primary_modifier: Modifiers::CONTROL,
         word_modifier: Modifiers::CONTROL,
         uses_arrows_for_line_edges: false,
         accepts_y_for_redo: true,
         wheel_line_height: 100.0,
+        wheel_notch: [100.0, 100.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: true,
+        shift_wheel_scrolls_horizontally: true,
+        control_wheel_zooms: true,
         treats_control_click_as_secondary: false,
         long_press_duration: Duration::from_millis(800),
+        double_click_interval: Duration::from_millis(500),
+        // 默认的双击范围是 4 × 4 的矩形：外接圆的半径是 2√2
+        double_click_distance: std::f32::consts::SQRT_2 * 2.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: true,
+        accepts_insert_for_clipboard: true,
+        pads_ime_area: false,
     };
 
     /// Linux 桌面的惯例
@@ -112,8 +161,19 @@ impl Conventions {
         uses_arrows_for_line_edges: false,
         accepts_y_for_redo: false,
         wheel_line_height: 100.0,
+        wheel_notch: [100.0, 100.0],
+        wheel_scrolls_pages: false,
+        fractional_wheel_is_precise: true,
+        shift_wheel_scrolls_horizontally: true,
+        control_wheel_zooms: false,
         treats_control_click_as_secondary: false,
         long_press_duration: Duration::from_millis(500),
+        double_click_interval: Duration::from_millis(400),
+        double_click_distance: 4.0,
+        drag_threshold: 4.0,
+        word_forward_skips_spaces: false,
+        accepts_insert_for_clipboard: true,
+        pads_ime_area: true,
     };
 
     /// 编译目标的系统的惯例（其他系统按 Linux 的）
@@ -223,6 +283,8 @@ thread_local! {
     static MODE: Cell<Option<Signal<AppearanceMode>>> = const { Cell::new(None) };
     static REDUCE_MOTION: Cell<Option<Signal<bool>>> = const { Cell::new(None) };
     static ACCENT: Cell<Option<Signal<Option<Color>>>> = const { Cell::new(None) };
+    /// [`with_appearance`] 期间固定的外观
+    static FIXED: Cell<Option<Appearance>> = const { Cell::new(None) };
 }
 
 /// 这个线程的设置信号：第一次用到时建好，初值问 `detect`（读可能在某个作用域里：建在所有作用域之外，不随它释放）
@@ -273,11 +335,30 @@ pub fn system_appearance() -> Appearance {
 /// 应用此刻生效的外观，响应式：设成浅色、深色（[`set_appearance_mode`]）时是它，跟着系统时是 [`system_appearance`]。
 /// 框架自带的样子按它画；自己的颜色要跟着深浅变时也在绑定里读它（或者读 [`crate::defaults::palette`]）
 pub fn appearance() -> Appearance {
-    match appearance_mode() {
+    let mode = appearance_mode();
+    if let Some(fixed) = FIXED.with(Cell::get) {
+        return fixed;
+    }
+    match mode {
         AppearanceMode::Light => Appearance::Light,
         AppearanceMode::Dark => Appearance::Dark,
         AppearanceMode::System => system_appearance(),
     }
+}
+
+/// 在 `f` 期间 [`appearance`]（和按它选的 [`crate::defaults::palette`]）固定读到 `appearance`，不管应用的外观设置。
+/// 宿主画不在窗口里的东西时用：打印的页按浅色画（纸是白的）。只影响 `f` 里新建、重新求值的绑定和绘制，
+/// 不通知已经建好的绑定；`f` panic 了也恢复
+pub fn with_appearance<R>(appearance: Appearance, f: impl FnOnce() -> R) -> R {
+    /// 离开时（正常返回或者 panic 展开）恢复
+    struct Restore(Option<Appearance>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = FIXED.try_with(|fixed| fixed.set(self.0));
+        }
+    }
+    let _restore = Restore(FIXED.with(|fixed| fixed.replace(Some(appearance))));
+    f()
 }
 
 /// 应用的外观设置，响应式（默认跟着系统）

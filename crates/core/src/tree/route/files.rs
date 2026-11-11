@@ -168,6 +168,6 @@ fn external_drop_call(tree: &TreeRef, point: [f32; 2], data: impl FnOnce() -> Ex
     if handlers.is_empty() {
         return None;
     }
-    let ExternalDropData { text, link, image, files } = data();
-    Some((handlers, ExternalDropEvent { text, link, image, files, position: t.local_point(id, point), window_position: point }))
+    let ExternalDropData { text, link, image, files, rich_text, custom } = data();
+    Some((handlers, ExternalDropEvent { text, link, image, files, rich_text, custom, position: t.local_point(id, point), window_position: point }))
 }

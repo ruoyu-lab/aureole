@@ -20,6 +20,7 @@ use reactive::Scope;
 use scene::Angle;
 
 use crate::image::RgbaImage;
+use crate::rich_text::SpanInfo;
 use crate::input::{Buttons, GesturePhase, Key, Modifiers, MouseButton, PhysicalKey, PointerId, PointerKind, WheelDelta};
 use crate::interaction::{Chord, FocusHandle};
 
@@ -55,7 +56,7 @@ bitflags::bitflags! {
         const TAB = 1 << 6;
         /// `focus_arrows` 的方向键在子孙之间移动焦点；输入框里的方向键移动插入点
         const ARROWS = 1 << 7;
-        /// 右键按下、手指长按时的右键点击（`on_secondary_click`）
+        /// 右键按下、手指长按、菜单键和 Shift+F10 时的右键点击（`on_secondary_click`）
         const CONTEXT_MENU = 1 << 8;
         /// 有焦点的输入框处理按键：打字、删除、移动插入点、剪贴板、撤销
         const EDIT = 1 << 9;
@@ -560,6 +561,10 @@ bitflags::bitflags! {
         const IMAGE = 1 << 2;
         /// 文件
         const FILES = 1 << 3;
+        /// 带格式的文字
+        const RICH_TEXT = 1 << 4;
+        /// 应用登记过的自己定的格式（`accept_drop_format`）里至少有一种
+        const CUSTOM = 1 << 5;
     }
 }
 
@@ -621,6 +626,10 @@ pub struct ExternalDropData {
     pub image: Option<RgbaImage>,
     /// 文件
     pub files: Vec<PathBuf>,
+    /// 带格式的文字；空的是没有
+    pub rich_text: Vec<SpanInfo>,
+    /// 应用登记过的自己定的格式里拖来了的：格式名和原样的字节，见 [`ExternalDropData::custom`]
+    pub custom: Vec<(String, Vec<u8>)>,
 }
 
 impl ExternalDropData {
@@ -631,8 +640,19 @@ impl ExternalDropData {
         kinds.set(ExternalDataKinds::LINK, self.link.is_some());
         kinds.set(ExternalDataKinds::IMAGE, self.image.is_some());
         kinds.set(ExternalDataKinds::FILES, !self.files.is_empty());
+        kinds.set(ExternalDataKinds::RICH_TEXT, !self.rich_text.is_empty());
+        kinds.set(ExternalDataKinds::CUSTOM, !self.custom.is_empty());
         kinds
     }
+
+    /// 应用自己定的格式 `format` 的字节；没拖来这种格式（或者没登记过）时是 `None`
+    pub fn custom(&self, format: &str) -> Option<&[u8]> {
+        custom_of(&self.custom, format)
+    }
+}
+
+fn custom_of<'a>(custom: &'a [(String, Vec<u8>)], format: &str) -> Option<&'a [u8]> {
+    custom.iter().find(|(name, _)| name == format).map(|(_, bytes)| bytes.as_slice())
 }
 
 /// 别的应用拖来的内容放下了，见 [`crate::Element::on_external_drop`]
@@ -646,10 +666,21 @@ pub struct ExternalDropEvent {
     pub image: Option<RgbaImage>,
     /// 文件
     pub files: Vec<PathBuf>,
+    /// 带格式的文字；空的是没有
+    pub rich_text: Vec<SpanInfo>,
+    /// 应用登记过的自己定的格式里拖来了的，见 [`ExternalDropEvent::custom`]
+    pub custom: Vec<(String, Vec<u8>)>,
     /// 元素自己的坐标
     pub position: [f32; 2],
     /// 窗口坐标，逻辑像素
     pub window_position: [f32; 2],
+}
+
+impl ExternalDropEvent {
+    /// 应用自己定的格式 `format` 的字节（要先用 `aureole::accept_drop_format` 登记）；没拖来这种格式时是 `None`
+    pub fn custom(&self, format: &str) -> Option<&[u8]> {
+        custom_of(&self.custom, format)
+    }
 }
 
 // ---- 改值 ----

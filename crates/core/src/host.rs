@@ -79,7 +79,7 @@ pub use accesskit::{ActionRequest, TreeUpdate};
 pub use crate::compositor::{Compositor, Handback, LayerInfo, LayerUpdates};
 pub use crate::performance::record_render;
 pub use crate::recording::Recorder;
-pub use crate::system::{SystemBackend, set_motion_reduced, set_system_accent_color, set_system_appearance, set_system_backend, set_thread_system_backend};
+pub use crate::system::{SystemBackend, set_motion_reduced, set_system_accent_color, set_system_appearance, set_system_backend, set_thread_system_backend, with_appearance};
 pub use crate::task::{MainThreadWaker, main_thread_waker, run_ready_tasks, set_main_thread_waker};
 pub use crate::timer::run_due_timers;
 pub use crate::tree::{DragOutRequest, ScenePatch};
@@ -143,6 +143,14 @@ pub trait HostWindow {
     fn accessibility(&self, update: TreeUpdate);
     /// 元素要拖到应用外面：交给系统的拖动会话，结束时把结果写进请求带的格子
     fn begin_drag_out(&self, request: DragOutRequest);
+    /// 拖着元素（元素之间的拖放）出了窗口：`point`（窗口坐标，逻辑像素）下面是不是同一个应用的另一个窗口。
+    /// 是的话这次拖放交给系统（[`Self::begin_drag_out`]，请求带着拖放的数据 [`DragOutRequest::data`]），
+    /// 那个窗口按元素之间的拖放接收（[`WindowTree::element_drag_over`] 这几个）。不是的话还在窗口里拖（靠边自动滚动）。
+    /// 只有一个窗口、拖不到窗口外面的宿主不用实现
+    fn app_window_at(&self, point: [f32; 2]) -> bool {
+        let _ = point;
+        false
+    }
     /// 窗口得到、失去键盘焦点（元素树处理之前）
     fn focus_changed(&self, focused: bool);
     /// 指针按在窗口的拖动区域（`window_drag_area`）上拖动了：交给系统拖动窗口。这次按下在元素树这边已经结束了
@@ -150,6 +158,11 @@ pub trait HostWindow {
     fn begin_window_drag(&self) {}
     /// 指针双击了窗口的拖动区域：按系统设置缩放或最小化窗口。不会缩放窗口的宿主不用实现
     fn perform_title_bar_double_click(&self) {}
+    /// 在窗口的拖动区域上点了右键（松开时）：在 `at`（窗口坐标，逻辑像素）弹出系统的窗口菜单
+    /// （Windows：还原、移动、大小、最小化、最大化、关闭），和在系统的标题栏上点右键一样。没有这种菜单的宿主不用实现
+    fn show_window_menu(&self, at: [f32; 2]) {
+        let _ = at;
+    }
     /// 应用自己画的最大化按钮（`window_maximize_button`）的范围变了，窗口坐标；元素卸载了时是 `None`。
     /// 系统没有这回事的宿主不用实现
     fn set_maximize_button_area(&self, area: Option<Rect>) {
@@ -297,6 +310,24 @@ impl WindowTree {
     /// 系统的回调里不方便碰元素树时，写进 [`DragOutRequest::result`]，下一帧交给源元素
     pub fn finish_drag_out(&self, accepted: bool) {
         tree::finish_out(&self.0, accepted);
+    }
+
+    /// 同一个应用的窗口交给系统的元素之间拖放（[`DragOutRequest::data`]）经过这个窗口的 `point`（窗口坐标）：
+    /// 这里的元素按元素之间的拖放接收（进入、经过、离开，和窗口里一样，只是没有影子；交给系统以后回到源元素的窗口时，
+    /// 它自己和子孙不算）。返回有没有元素接收这份数据：系统问能不能放下时这样回答
+    pub fn element_drag_over(&self, point: [f32; 2], data: &Rc<dyn std::any::Any>) -> bool {
+        tree::visit_over(&self.0, point, data)
+    }
+
+    /// 拖来的元素离开了窗口（或者取消了）：目标收到 `on_drag_leave`
+    pub fn element_drag_leave(&self) {
+        tree::visit_leave(&self.0);
+    }
+
+    /// 拖来的元素在 `point` 放下：交给指针下接收这份数据的元素的 `on_drop`。返回有没有被接住（告诉系统，源元素的
+    /// `on_drag_out_end` 收到它）
+    pub fn element_drop(&self, point: [f32; 2], data: &Rc<dyn std::any::Any>) -> bool {
+        tree::visit_drop(&self.0, point, data)
     }
 
     /// 不保活的句柄：放进这棵树自己的绑定里时用，不让它们互相拉住
@@ -518,7 +549,8 @@ impl<W: HostWindow> WindowHost<W> {
                 false
             }
         };
-        // 拖到应用外面、拖动窗口：还在处理这次指针事件时交给系统
+        // 拖到应用外面、拖到应用的另一个窗口、拖动窗口：还在处理这次指针事件时交给系统
+        self.cross_window();
         self.drag_out();
         self.window_requests();
         self.reset_ime();
@@ -584,6 +616,16 @@ impl<W: HostWindow> WindowHost<W> {
         FrameReport { stats, busy, next }
     }
 
+    /// 拖着元素出了窗口、指针下面是同一个应用的另一个窗口：交给系统拖过去（下面的 [`Self::drag_out`] 交给窗口）
+    fn cross_window(&self) {
+        let point = self.tree.0.borrow().drag_outside();
+        if let Some(point) = point
+            && self.window.app_window_at(point)
+        {
+            tree::hand_off(&self.tree.0);
+        }
+    }
+
     /// 元素要拖到应用外面：交给窗口
     fn drag_out(&self) {
         let request = self.tree.0.borrow_mut().take_drag_out();
@@ -594,12 +636,15 @@ impl<W: HostWindow> WindowHost<W> {
 
     /// 窗口的拖动区域：双击、开始拖动交给窗口（系统的移动循环可能不马上返回，先放开元素树的借用）
     fn window_requests(&self) {
-        let (double_click, drag) = self.tree.0.borrow_mut().take_window_requests();
+        let (double_click, drag, menu) = self.tree.0.borrow_mut().take_window_requests();
         if double_click {
             self.window.perform_title_bar_double_click();
         }
         if drag {
             self.window.begin_window_drag();
+        }
+        if let Some(at) = menu {
+            self.window.show_window_menu(at);
         }
     }
 }

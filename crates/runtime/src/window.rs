@@ -319,6 +319,15 @@ impl WindowHandle {
         self.state().is_some_and(|s| s.maximized.get())
     }
 
+    /// 窗口所在显示器的刷新率，赫兹（刷新率可变的屏幕是系统报的那一档，一般是上限，比如 120）。
+    /// 窗口还没建好、系统问不到时为 `None`。每次调用都问一次系统，不要每帧调。
+    /// 给自己按屏幕的节奏出画面的东西用（内嵌的 CEF 视图让内核按它出帧）
+    pub fn refresh_rate(self) -> Option<f32> {
+        let window = native(self)?;
+        let millihertz = window.current_monitor()?.refresh_rate_millihertz()?;
+        Some(millihertz as f32 / 1000.0)
+    }
+
     /// 窗口所在显示器的颜色能力（广色域、HDR 的余量）和窗口此刻的输出方式。
     /// 窗口挪到别的显示器、调亮度、开始显示 HDR 内容时会变（每 0.5 秒问一次显示器）
     pub fn display_color(self) -> DisplayColor {
@@ -382,7 +391,16 @@ impl WindowHandle {
     pub fn set_size(self, width: impl Number, height: impl Number) {
         let size = LogicalSize::new(width.to_f64(), height.to_f64());
         self.with_window(move |w| {
-            let _ = w.request_inner_size(size);
+            // 隐藏了标题栏的窗口（Windows）：窗口库换算大小时不知道内容区外面还留着系统的边框，加上再要
+            match crate::system::backend().window().hidden_title_bar_frame(w) {
+                Some([extra_width, extra_height]) => {
+                    let physical = size.to_physical::<u32>(w.scale_factor());
+                    let _ = w.request_inner_size(winit::dpi::PhysicalSize::new(physical.width + extra_width, physical.height + extra_height));
+                }
+                None => {
+                    let _ = w.request_inner_size(size);
+                }
+            }
         });
     }
 
@@ -543,6 +561,29 @@ pub(crate) fn is_zooming(handle: WindowHandle) -> bool {
 /// 已经创建的窗口（给需要原生窗口的系统功能，比如作为文件对话框的父窗口）
 pub(crate) fn native(handle: WindowHandle) -> Option<Arc<winit::window::Window>> {
     with_registry(|r| r.windows.get(&handle.0).and_then(|entry| entry.window.clone()))
+}
+
+/// 应用的另一个窗口（开着、显示着、没最小化）盖着窗口 `handle` 的 `point`（窗口坐标，逻辑像素，在窗口外面）。
+/// 问不到窗口位置（Wayland）时是 `false`。macOS 的屏幕坐标是逻辑的（每个窗口按自己的缩放换算），Windows 的是物理像素
+pub(crate) fn app_window_at(handle: WindowHandle, point: [f32; 2]) -> bool {
+    /// 窗口内容区在屏幕上的范围：左上角、大小
+    fn area(window: &winit::window::Window) -> Option<([f64; 2], [f64; 2])> {
+        let position = window.inner_position().ok()?;
+        let size = window.inner_size();
+        let scale = if cfg!(target_os = "macos") { window.scale_factor() } else { 1.0 };
+        Some(([position.x as f64 / scale, position.y as f64 / scale], [size.width as f64 / scale, size.height as f64 / scale]))
+    }
+    with_registry(|r| {
+        let Some(source) = r.windows.get(&handle.0).and_then(|e| e.window.as_ref()) else { return false };
+        let Some((origin, _)) = area(source) else { return false };
+        let scale = if cfg!(target_os = "macos") { 1.0 } else { source.scale_factor() };
+        let at = [origin[0] + f64::from(point[0]) * scale, origin[1] + f64::from(point[1]) * scale];
+        r.windows.iter().filter(|(id, _)| **id != handle.0).filter_map(|(_, e)| e.window.as_deref()).any(|window| {
+            window.is_visible() != Some(false)
+                && window.is_minimized() != Some(true)
+                && area(window).is_some_and(|(start, size)| (0..2).all(|i| at[i] >= start[i] && at[i] < start[i] + size[i]))
+        })
+    })
 }
 
 /// 窗口获得或失去焦点

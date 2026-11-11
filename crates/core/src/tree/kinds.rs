@@ -12,6 +12,7 @@
 mod char_grid;
 mod editor;
 mod image;
+pub(crate) use image::image_area;
 mod path;
 mod text;
 mod text_runs;

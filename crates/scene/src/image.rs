@@ -13,6 +13,10 @@ pub const IMAGE_ATLAS_LEVELS: u32 = 5;
 /// 图片图集里图片的对齐和尺寸补齐粒度，像素：最小一级 mip 正好是 1 个纹素
 pub const IMAGE_ATLAS_ALIGN: u32 = 1 << (IMAGE_ATLAS_LEVELS - 1);
 
+/// 外部纹理（框架以外的代码自己画的 GPU 纹理，渲染器的 `ExternalTexture`）的编号从这里起，
+/// 和图片系统分配的单独纹理编号（从 1 往上数）分开。显示列表里照样用 [`crate::QuadEffect::Image`] 引用它
+pub const EXTERNAL_TEXTURE_BASE: u32 = 1 << 31;
+
 /// 图片像素的存法
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum ImageEncoding {

@@ -1080,6 +1080,29 @@ pub(crate) struct ImageArea {
     pub border: Option<(f32, Fill)>,
 }
 
+/// 外部纹理（编号 `texture`，见 [`scene::EXTERNAL_TEXTURE_BASE`]）铺满内容区：和单独纹理的大图一样的图元，
+/// 纹理的整张对应内容区。纹理还没登记时渲染器跳过这个图元
+pub(crate) fn push_external(texture: u32, area: &ImageArea, list: &mut DisplayList) {
+    let content = area.content;
+    if content.width <= 0.0 || content.height <= 0.0 {
+        return;
+    }
+    let [cx, cy] = area.local.apply(content.center());
+    let mut quad = Quad::new(cx - content.width * 0.5, cy - content.height * 0.5, content.width, content.height);
+    quad.transform = area.local.linear;
+    quad.radii = [area.inner_radius; 4];
+    quad.uv = [0.0, 0.0, 1.0, 1.0];
+    // 图片在纹理里的范围（见 `texture_range`）：整张
+    quad.shadow_offset = [0.0, 0.0];
+    quad.shadow_blur = 1.0;
+    quad.border_width = 1.0;
+    quad.kind = Quad::IMAGE_TEXTURE;
+    quad.opacity = area.opacity;
+    list.quad_effects.push(scene::QuadEffect::Image { quad: list.quads.len() as u32, texture });
+    list.quads.push(quad);
+    area.push_border(list);
+}
+
 impl ImageArea {
     /// 边框画在图片上面（有边框时）
     fn push_border(&self, list: &mut DisplayList) {

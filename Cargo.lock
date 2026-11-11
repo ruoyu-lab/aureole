@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "aureole"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -445,11 +445,11 @@ dependencies = [
 
 [[package]]
 name = "aureole-animation"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 
 [[package]]
 name = "aureole-bundle"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "aureole-installer",
  "image",
@@ -461,7 +461,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-controls"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "aureole",
  "aureole-core",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-core"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "accesskit",
  "aureole",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-devtools"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "aureole",
  "aureole-core",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-installer"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "aureole",
  "flate2",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-platform"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-reactive"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "slotmap",
  "tracing",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-render"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "aureole-scene",
  "bytemuck",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "aureole-runtime"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -596,14 +596,14 @@ dependencies = [
 
 [[package]]
 name = "aureole-scene"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "aureole-testing"
-version = "0.0.1-beta.2"
+version = "0.0.1-beta.3"
 dependencies = [
  "accesskit",
  "aureole",

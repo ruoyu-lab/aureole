@@ -9,6 +9,8 @@
 //! 触摸屏的手指换成指针输入，设备是触摸，带上系统给的编号。系统还可能把同一次触摸再报成鼠标
 //! （Windows 在手指抬起前后补发鼠标消息，窗口库没把"这是手指转来的"的标记转出来；X11 上第一根手指还会带着指针一起移动）：
 //! 手指在屏幕上和抬起后不久（[`TOUCH_MUTES_MOUSE`]）的鼠标移动、按下不交出去，不然一次点按会点两下
+//!
+//! 窗口得到焦点时窗口库（Windows、X11）把还按着的键补发成按下：不交出去（见 [`keyboard`]）
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,6 +53,11 @@ pub(crate) struct TranslateState {
 }
 
 impl TranslateState {
+    /// 现在按哪个缩放比例换算（窗口库报告缩放比例变了时更新）
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
     /// 窗口此刻的缩放（逻辑像素 -> 物理像素）
     pub fn new(scale: f64) -> Self {
         Self {
@@ -232,7 +239,7 @@ pub(crate) fn translate(event: &WindowEvent, state: &mut TranslateState) -> Smal
             state.modifiers = from_winit_modifiers(modifiers.state());
             Some(InputKind::Modifiers(state.modifiers))
         }
-        WindowEvent::KeyboardInput { event, .. } => {
+        WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
             let input = KeyInput {
                 key: key(&event.logical_key),
                 base: base_key(event).map(|k| key(&k)),
@@ -241,7 +248,7 @@ pub(crate) fn translate(event: &WindowEvent, state: &mut TranslateState) -> Smal
                 modifiers: state.modifiers,
                 repeated: event.repeat,
             };
-            Some(if event.state == ElementState::Pressed { InputKind::KeyDown(input) } else { InputKind::KeyUp(input) })
+            keyboard(input, event.state == ElementState::Pressed, *is_synthetic)
         }
         WindowEvent::Ime(event) => Some(InputKind::Ime(ime(event))),
         // 拖进几个文件，系统就发几次：位置一样的只交一次
@@ -265,6 +272,17 @@ pub(crate) fn translate(event: &WindowEvent, state: &mut TranslateState) -> Smal
         out.push(InputEvent::new(state.time, kind));
     }
     out
+}
+
+/// 一个按键事件。窗口得到焦点时窗口库（Windows、X11）把此刻按着的键补发成按下（`synthetic`），带着它们打出的字：
+/// 回车关掉对话框、在资源管理器里按回车启动应用时回车还按着，补发的按下会再激活一次焦点上的按钮（再打开一次对话框），
+/// 按着的字母会打进输入框。补发的按下不交出去（修饰键另由修饰键事件报告）；补发的松开照交（没交过按下的松开元素树不理会）
+fn keyboard(input: KeyInput, pressed: bool, synthetic: bool) -> Option<InputKind> {
+    match (pressed, synthetic) {
+        (true, true) => None,
+        (true, false) => Some(InputKind::KeyDown(input)),
+        (false, _) => Some(InputKind::KeyUp(input)),
+    }
 }
 
 fn gesture_phase(phase: winit::event::TouchPhase) -> GesturePhase {

@@ -65,16 +65,46 @@ impl Motion {
     }
 }
 
-/// 往右一个字（`word` 时到词尾，中日文按词典分的词）；走不动（到了这一段的右边）时原样返回
+/// 往右一个字（`word` 时到词尾，中日文按词典分的词；平台惯例是到下一个词的开头时（Windows），再跳过词后面的空白）；
+/// 走不动（到了这一段的右边）时原样返回
 pub(crate) fn right(layout: &Layout<SpanId>, text: &str, from: Cursor, word: bool) -> Cursor {
-    if word
-        && !layout.is_rtl()
+    if !word {
+        return from.next_visual(layout);
+    }
+    let skips = crate::system::conventions().word_forward_skips_spaces && !layout.is_rtl();
+    // 后面就是空白（上一次停在了词尾）：跳过空白就是下一个词的开头
+    if skips && let Some(start) = after_spaces(text, from.index()) {
+        return Cursor::from_byte_index(layout, start, Affinity::Downstream);
+    }
+    let end = word_end(layout, text, from);
+    match after_spaces(text, end.index()).filter(|_| skips) {
+        Some(start) => Cursor::from_byte_index(layout, start, Affinity::Downstream),
+        None => end,
+    }
+}
+
+/// `index` 处是空白时，跳过这一串空白到的位置（跨过换行就停在换行后面：下一行的开头）；不是空白时是 `None`。
+/// 按词往后走到下一个词的开头（[`crate::Conventions::word_forward_skips_spaces`]）用
+pub(crate) fn after_spaces(text: &str, index: usize) -> Option<usize> {
+    let mut end = index;
+    for c in text.get(index..)?.chars() {
+        if !c.is_whitespace() {
+            break;
+        }
+        end += c.len_utf8();
+        if c == '\n' {
+            break;
+        }
+    }
+    (end > index).then_some(end)
+}
+
+/// 往右到词尾（中日文按词典分的词）
+fn word_end(layout: &Layout<SpanId>, text: &str, from: Cursor) -> Cursor {
+    if !layout.is_rtl()
         && let Some(end) = segmentation::next_word_end(text, from.index())
     {
         return Cursor::from_byte_index(layout, end, Affinity::Upstream);
-    }
-    if !word {
-        return from.next_visual(layout);
     }
     to_word_edge(
         layout,

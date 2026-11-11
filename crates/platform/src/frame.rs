@@ -4,7 +4,8 @@
 //!
 //! - macOS：`CADisplayLink`，从窗口的视图创建（macOS 14 起）。
 //! - Windows：单独一个线程等合成器的时钟（`DCompositionWaitForCompositorClock`，Windows 11 起）；
-//!   拿不到时等窗口所在输出的垂直消隐（DXGI 的 `WaitForVBlank`）。等到了把帧放进信箱、叫醒主线程，
+//!   拿不到、用着坏了时等窗口所在输出的垂直消隐（DXGI 的 `WaitForVBlank`），再不行才是计时器。
+//!   显示器关着时合成器时钟不等就返回，这期间按垂直消隐走，亮了换回来。等到了把帧放进信箱、叫醒主线程，
 //!   主线程在 [`FrameClock::dispatch`] 里交给回调。暂停时线程睡在条件变量上，不轮询。
 //! - Linux 的 Wayland：表面的帧回调（`wl_surface.frame`），挂在窗口库的连接上、用自己的事件队列。
 //! - X11、拿不到上面这些时：按刷新率的计时器（见 [`FrameClockKind::Timer`]），可以用 [`PresentFeedback`]
@@ -43,7 +44,7 @@ mod timer;
 mod wayland;
 
 #[cfg_attr(not(windows), allow(unused_imports))]
-pub(crate) use blocking::{BlockingClock, BlockingSource, SourceTick};
+pub(crate) use blocking::{BlockingClock, BlockingSource, SourceTick, Stage};
 #[cfg(target_os = "windows")]
 pub(crate) use compositor::{windows_clock, windows_clock_kind};
 #[cfg(target_os = "macos")]
@@ -228,7 +229,8 @@ impl ClockAnchor {
 }
 
 /// 想要的帧率范围，单位赫兹。显示链接把它交给系统（ProMotion 屏据此切到 120Hz）；
-/// 计时器按 `preferred` 走；等合成器、垂直消隐的实现不会比 `max` 更频繁地交帧
+/// 计时器按 `preferred` 走；等合成器、垂直消隐的实现每次刷新都醒，隔整数个刷新交一帧，不比 `max` 更频繁
+/// （165Hz 的显示器上 `max` 是 120 时每两次刷新一帧，82.5 帧；要跟满刷新率，`max` 不能低于它）
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameRateRange {
     /// 最低能接受的帧率
